@@ -1,0 +1,254 @@
+<!-- index.html -->
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>ESP12 Monitor</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Courier New', monospace;
+            background: #0a0a0a;
+            color: #00ff00;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+        }
+        
+        .container {
+            text-align: center;
+            padding: 40px;
+        }
+        
+        .main-value {
+            font-size: 120px;
+            font-weight: bold;
+            color: #00ff00;
+            text-shadow: 0 0 20px rgba(0, 255, 0, 0.5),
+                         0 0 40px rgba(0, 255, 0, 0.3),
+                         0 0 80px rgba(0, 255, 0, 0.2);
+            animation: glow 2s ease-in-out infinite alternate;
+            transition: all 0.3s;
+        }
+        
+        .main-value.high {
+            color: #ff0000;
+            text-shadow: 0 0 20px rgba(255, 0, 0, 0.5),
+                         0 0 40px rgba(255, 0, 0, 0.3),
+                         0 0 80px rgba(255, 0, 0, 0.2);
+        }
+        
+        @keyframes glow {
+            from {
+                text-shadow: 0 0 20px rgba(0, 255, 0, 0.5),
+                             0 0 40px rgba(0, 255, 0, 0.3),
+                             0 0 80px rgba(0, 255, 0, 0.2);
+            }
+            to {
+                text-shadow: 0 0 30px rgba(0, 255, 0, 0.7),
+                             0 0 60px rgba(0, 255, 0, 0.5),
+                             0 0 100px rgba(0, 255, 0, 0.3);
+            }
+        }
+        
+        .info {
+            font-size: 24px;
+            color: #888;
+            margin-top: 20px;
+            opacity: 0.8;
+        }
+        
+        .device-id {
+            font-size: 18px;
+            color: #666;
+            margin-bottom: 10px;
+        }
+        
+        .status {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 10px;
+            animation: blink 1s infinite;
+        }
+        
+        .status.connected {
+            background: #00ff00;
+            box-shadow: 0 0 10px #00ff00;
+        }
+        
+        .status.disconnected {
+            background: #ff0000;
+            box-shadow: 0 0 10px #ff0000;
+            animation: none;
+        }
+        
+        @keyframes blink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.3; }
+        }
+        
+        .stats {
+            margin-top: 40px;
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 30px;
+            max-width: 600px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+        
+        .stat-box {
+            background: rgba(0, 255, 0, 0.05);
+            border: 1px solid rgba(0, 255, 0, 0.2);
+            border-radius: 10px;
+            padding: 20px;
+        }
+        
+        .stat-label {
+            font-size: 14px;
+            color: #666;
+            margin-bottom: 10px;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+        }
+        
+        .stat-value {
+            font-size: 28px;
+            color: #00ff00;
+        }
+        
+        .error {
+            color: #ff0000;
+            font-size: 18px;
+            margin-top: 50px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="device-id">
+            <span class="status" id="statusDot"></span>
+            <span id="deviceName">Waiting for device...</span>
+        </div>
+        
+        <div class="main-value" id="mainValue">---</div>
+        
+        <div class="info" id="infoText">No data</div>
+        
+        <div class="stats">
+            <div class="stat-box">
+                <div class="stat-label">Frequency</div>
+                <div class="stat-value" id="frequency">0 Hz</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-label">Signal</div>
+                <div class="stat-value" id="rssi">0 dBm</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-label">Uptime</div>
+                <div class="stat-value" id="uptime">0s</div>
+            </div>
+        </div>
+        
+        <div class="error" id="error" style="display: none;"></div>
+    </div>
+    
+    <script>
+        // Настройки - укажите ваш хостинг и deviceId для просмотра
+        const WS_URL = 'ws://' + window.location.hostname + ':8765';
+        const DEVICE_ID = 'esp12_sensor_1'; // Измените на ваш deviceId
+        
+        let ws;
+        let reconnectTimeout;
+        
+        function connect() {
+            ws = new WebSocket(WS_URL);
+            
+            ws.onopen = () => {
+                console.log('WebSocket connected');
+                document.getElementById('statusDot').className = 'status connected';
+                document.getElementById('deviceName').textContent = DEVICE_ID;
+                
+                // Регистрируемся как веб-клиент
+                ws.send(JSON.stringify({
+                    type: 'web_client'
+                }));
+                
+                document.getElementById('error').style.display = 'none';
+                clearTimeout(reconnectTimeout);
+            };
+            
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                
+                if (data.type === 'update' && data.deviceId === DEVICE_ID) {
+                    updateDisplay(data.data);
+                }
+            };
+            
+            ws.onclose = () => {
+                console.log('WebSocket disconnected');
+                document.getElementById('statusDot').className = 'status disconnected';
+                document.getElementById('error').style.display = 'block';
+                document.getElementById('error').textContent = 'Connection lost. Reconnecting...';
+                
+                // Переподключение через 3 секунды
+                reconnectTimeout = setTimeout(connect, 3000);
+            };
+            
+            ws.onerror = (error) => {
+                console.error('WebSocket error:', error);
+                document.getElementById('error').style.display = 'block';
+                document.getElementById('error').textContent = 'Cannot connect to server. Check if server is running.';
+            };
+        }
+        
+        function updateDisplay(data) {
+            const pinState = data.pin_state;
+            const freq = data.frequency || 0;
+            const rssi = data.rssi || 0;
+            const uptime = data.uptime || 0;
+            
+            // Основное значение
+            const mainEl = document.getElementById('mainValue');
+            if (pinState) {
+                mainEl.textContent = 'HIGH';
+                mainEl.className = 'main-value high';
+            } else {
+                mainEl.textContent = 'LOW';
+                mainEl.className = 'main-value';
+            }
+            
+            // Дополнительная инфа
+            document.getElementById('infoText').textContent = 
+                `Pin D0: ${pinState ? '3.3V' : '0V'} | Last update: ${new Date().toLocaleTimeString()}`;
+            
+            // Статистика
+            document.getElementById('frequency').textContent = freq.toFixed(1) + ' Hz';
+            document.getElementById('rssi').textContent = rssi + ' dBm';
+            
+            // Uptime в читаемом виде
+            const hours = Math.floor(uptime / 3600);
+            const minutes = Math.floor((uptime % 3600) / 60);
+            const seconds = Math.floor(uptime % 60);
+            document.getElementById('uptime').textContent = 
+                `${hours}h ${minutes}m ${seconds}s`;
+            
+            document.getElementById('error').style.display = 'none';
+        }
+        
+        // Запуск
+        connect();
+    </script>
+</body>
+</html>
