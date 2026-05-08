@@ -1,19 +1,12 @@
-# server.py
-import asyncio
-import websockets
+# server_wss.py
+import os
+import ssl
 import json
 from datetime import datetime
 from pathlib import Path
-import http.server
-import socketserver
-import threading
-import urllib.parse
+from aiohttp import web
 
-# ====== КОНФИГУРАЦИЯ ======
-WS_PORT = 8765
-HTTP_PORT = 8000
-
-# Загружаем конфиг
+# Конфиг
 def load_config():
     config_file = Path("config.json")
     if config_file.exists():
@@ -24,21 +17,11 @@ def load_config():
 config = load_config()
 ALLOWED_DEVICES = config.get("allowed_devices", ["esp12_sensor_1"])
 
-print("=" * 60)
-print("ESP12 MONITOR SERVER")
-print("=" * 60)
-print(f"Allowed devices: {ALLOWED_DEVICES}")
-print(f"Web UI: http://0.0.0.0:{HTTP_PORT}")
-print(f"WebSocket: ws://0.0.0.0:{WS_PORT}")
-print("=" * 60)
-
-# Хранилище данных
+# Хранилище
 devices_data = {}
 web_clients = set()
 
-# HTML страница
-HTML_PAGE = """
-<!DOCTYPE html>
+HTML_PAGE = """<!DOCTYPE html>
 <html>
 <head>
     <meta charset="UTF-8">
@@ -54,7 +37,6 @@ HTML_PAGE = """
             display: flex;
             align-items: center;
             justify-content: center;
-            overflow: hidden;
         }
         .container { text-align: center; padding: 40px; }
         .main-value {
@@ -66,7 +48,7 @@ HTML_PAGE = """
         }
         .main-value.high {
             color: #ff0000;
-            text-shadow: 0 0 20px rgba(255,0,0,0.5), 0 0 40px rgba(255,0,0,0.3);
+            text-shadow: 0 0 20px rgba(255,0,0,0.5);
         }
         @keyframes glow {
             from { text-shadow: 0 0 20px rgba(0,255,0,0.5); }
@@ -75,10 +57,10 @@ HTML_PAGE = """
         .info { font-size: 20px; color: #888; margin-top: 20px; }
         .status { display: inline-block; width: 12px; height: 12px; border-radius: 50%; margin-right: 10px; }
         .status.connected { background: #00ff00; box-shadow: 0 0 10px #00ff00; }
-        .status.disconnected { background: #ff0000; box-shadow: 0 0 10px #ff0000; }
-        .stats { margin-top: 40px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 30px; }
+        .status.disconnected { background: #ff0000; }
+        .stats { margin-top: 40px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 30px; max-width: 600px; margin-left: auto; margin-right: auto; }
         .stat-box { background: rgba(0,255,0,0.05); border: 1px solid rgba(0,255,0,0.2); border-radius: 10px; padding: 20px; }
-        .stat-label { font-size: 12px; color: #666; margin-bottom: 10px; text-transform: uppercase; }
+        .stat-label { font-size: 12px; color: #666; text-transform: uppercase; margin-bottom: 10px; }
         .stat-value { font-size: 24px; color: #00ff00; }
     </style>
 </head>
@@ -106,17 +88,15 @@ HTML_PAGE = """
         </div>
     </div>
     <script>
-        const PORT = """ + str(WS_PORT) + """;
-        const wsUrl = 'ws://' + window.location.hostname + ':' + PORT;
+        const wsUrl = (window.location.protocol === 'https:' ? 'wss://' : 'ws://') + window.location.host + '/ws';
         let ws;
         
         function connect() {
             ws = new WebSocket(wsUrl);
             
             ws.onopen = () => {
-                console.log('Connected');
                 document.getElementById('statusDot').className = 'status connected';
-                document.getElementById('deviceName').textContent = 'Online';
+                document.getElementById('deviceName').textContent = 'Connected';
                 ws.send(JSON.stringify({type: 'web_client'}));
             };
             
@@ -133,13 +113,10 @@ HTML_PAGE = """
                         el.className = 'main-value';
                     }
                     document.getElementById('infoText').textContent = 'Pin D0: ' + (d.pin_state ? '3.3V' : '0V');
-                    document.getElementById('frequency').textContent = (d.frequency || 0).toFixed(1) + ' Hz';
-                    document.getElementById('rssi').textContent = (d.rssi || 0) + ' dBm';
-                    const uptime = d.uptime || 0;
-                    const h = Math.floor(uptime/3600);
-                    const m = Math.floor((uptime%3600)/60);
-                    const s = uptime % 60;
-                    document.getElementById('uptime').textContent = h + 'h ' + m + 'm ' + s + 's';
+                    document.getElementById('frequency').textContent = (d.frequency||0).toFixed(1) + ' Hz';
+                    document.getElementById('rssi').textContent = (d.rssi||0) + ' dBm';
+                    const u = d.uptime||0;
+                    document.getElementById('uptime').textContent = Math.floor(u/3600)+'h '+Math.floor((u%3600)/60)+'m '+u%60+'s';
                 }
             };
             
@@ -152,130 +129,117 @@ HTML_PAGE = """
         connect();
     </script>
 </body>
-</html>
-"""
+</html>"""
 
-# HTTP сервер для веб-страницы
-class WebHandler(http.server.SimpleHTTPRequestHandler):
-    def do_GET(self):
-        if self.path == '/' or self.path == '/index.html':
-            self.send_response(200)
-            self.send_header('Content-type', 'text/html')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
-            self.wfile.write(HTML_PAGE.encode())
-        elif self.path == '/health':
-            self.send_response(200)
-            self.send_header('Content-type', 'application/json')
-            self.end_headers()
-            self.wfile.write(json.dumps({"status": "ok"}).encode())
-        else:
-            self.send_response(404)
-            self.end_headers()
+async def handle_http(request):
+    """Отдаем HTML страницу"""
+    return web.Response(text=HTML_PAGE, content_type='text/html')
 
-def run_http_server():
-    """Запуск HTTP сервера в отдельном потоке"""
-    server = socketserver.TCPServer(("0.0.0.0", HTTP_PORT), WebHandler)
-    print(f"HTTP Server started on port {HTTP_PORT}")
-    server.serve_forever()
-
-# WebSocket сервер
-async def handle_websocket(websocket, path=None):
-    """Обработчик WebSocket"""
+async def handle_ws(request):
+    """WebSocket обработчик"""
+    ws = web.WebSocketResponse()
+    await ws.prepare(request)
+    
     client_type = None
     device_id = None
     
-    try:
-        async for message in websocket:
-            data = json.loads(message)
-            
-            if data.get("type") == "register":
-                device_id = data.get("deviceId", "")
-                
-                if device_id not in ALLOWED_DEVICES:
-                    print(f"❌ DENIED: {device_id}")
-                    await websocket.send(json.dumps({
-                        "type": "error",
-                        "message": "Device not allowed"
-                    }))
-                    continue
-                
-                client_type = "esp"
-                devices_data[device_id] = {
-                    "connected": True,
-                    "last_data": None,
-                    "last_update": None
-                }
-                print(f"✅ ESP Connected: {device_id}")
-                
-                await websocket.send(json.dumps({
-                    "type": "registered",
-                    "status": "success"
-                }))
-            
-            elif data.get("type") == "sensor_data":
-                device_id = data.get("deviceId", "unknown")
-                sensor = data.get("data", {})
-                
-                if device_id in devices_data:
-                    devices_data[device_id]["last_data"] = sensor
-                    devices_data[device_id]["last_update"] = datetime.now().isoformat()
-                
-                pin = "HIGH" if sensor.get("pin_state") else "LOW"
-                freq = sensor.get("frequency", 0)
-                print(f"📡 {device_id} | Pin: {pin} | Freq: {freq}Hz")
-                
-                # Рассылка веб-клиентам
-                msg = json.dumps({
-                    "type": "update",
-                    "deviceId": device_id,
-                    "data": sensor
-                })
-                
-                to_remove = set()
-                for client in web_clients:
-                    try:
-                        await client.send(msg)
-                    except:
-                        to_remove.add(client)
-                web_clients.difference_update(to_remove)
-            
-            elif data.get("type") == "web_client":
-                client_type = "web"
-                web_clients.add(websocket)
-                print(f"🌐 Web client (total: {len(web_clients)})")
-                
-                # Отправляем последние данные
-                for dev_id, dev_data in devices_data.items():
-                    if dev_data.get("last_data"):
-                        await websocket.send(json.dumps({
-                            "type": "update",
-                            "deviceId": dev_id,
-                            "data": dev_data["last_data"]
-                        }))
+    print(f"🔌 New WebSocket connection")
     
-    except websockets.exceptions.ConnectionClosed:
-        pass
+    try:
+        async for msg in ws:
+            if msg.type == web.WSMsgType.TEXT:
+                try:
+                    data = json.loads(msg.data)
+                    
+                    if data.get("type") == "register":
+                        device_id = data.get("deviceId", "")
+                        
+                        if device_id not in ALLOWED_DEVICES:
+                            print(f"❌ Device DENIED: {device_id}")
+                            await ws.send_json({"type": "error", "message": "Device not allowed"})
+                            continue
+                        
+                        client_type = "esp"
+                        devices_data[device_id] = {
+                            "connected": True,
+                            "last_data": None,
+                            "last_update": None
+                        }
+                        print(f"✅ ESP Connected: {device_id}")
+                        await ws.send_json({"type": "registered", "status": "success"})
+                    
+                    elif data.get("type") == "sensor_data":
+                        device_id = data.get("deviceId", "unknown")
+                        sensor = data.get("data", {})
+                        
+                        devices_data[device_id] = {
+                            "connected": True,
+                            "last_data": sensor,
+                            "last_update": datetime.now().isoformat()
+                        }
+                        
+                        pin = "HIGH" if sensor.get("pin_state") else "LOW"
+                        freq = sensor.get("frequency", 0)
+                        rssi = sensor.get("rssi", 0)
+                        print(f"📡 {device_id} | Pin: {pin} | Freq: {freq:.1f}Hz | RSSI: {rssi}dBm")
+                        
+                        # Рассылаем веб-клиентам
+                        msg_data = json.dumps({
+                            "type": "update",
+                            "deviceId": device_id,
+                            "data": sensor
+                        })
+                        
+                        dead = set()
+                        for client in web_clients.copy():
+                            try:
+                                await client.send_str(msg_data)
+                            except:
+                                dead.add(client)
+                        web_clients.difference_update(dead)
+                    
+                    elif data.get("type") == "web_client":
+                        client_type = "web"
+                        web_clients.add(ws)
+                        print(f"🌐 Web client (total: {len(web_clients)})")
+                        
+                        # Отправляем текущие данные
+                        for dev_id, dev_data in devices_data.items():
+                            if dev_data.get("last_data"):
+                                await ws.send_json({
+                                    "type": "update",
+                                    "deviceId": dev_id,
+                                    "data": dev_data["last_data"]
+                                })
+                
+                except json.JSONDecodeError as e:
+                    print(f"JSON error: {e}")
+                except Exception as e:
+                    print(f"Error: {e}")
+            
+            elif msg.type == web.WSMsgType.ERROR:
+                print(f"WS error: {ws.exception()}")
+    
+    except Exception as e:
+        print(f"Connection error: {e}")
     finally:
         if client_type == "esp" and device_id:
             if device_id in devices_data:
                 devices_data[device_id]["connected"] = False
             print(f"❌ ESP Disconnected: {device_id}")
         elif client_type == "web":
-            web_clients.discard(websocket)
-
-async def main():
-    # Запускаем HTTP в потоке
-    http_thread = threading.Thread(target=run_http_server, daemon=True)
-    http_thread.start()
+            web_clients.discard(ws)
+            print(f"🌐 Web client left (total: {len(web_clients)})")
     
-    # Запускаем WebSocket
-    print(f"Starting WebSocket on port {WS_PORT}")
-    async with websockets.serve(handle_websocket, "0.0.0.0", WS_PORT):
-        await asyncio.Future()
+    return ws
 
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\nServer stopped")
+# Запуск
+if __name__ == '__main__':
+    app = web.Application()
+    app.router.add_get('/', handle_http)
+    app.router.add_get('/ws', handle_ws)
+    
+    port = int(os.environ.get('PORT', 8000))
+    print(f"Server starting on port {port}")
+    print(f"Allowed devices: {ALLOWED_DEVICES}")
+    web.run_app(app, port=port)
