@@ -1,7 +1,6 @@
 # server.py
 import os
 import json
-from datetime import datetime
 from pathlib import Path
 from aiohttp import web
 
@@ -10,15 +9,13 @@ def load_config():
     if config_file.exists():
         with open(config_file, 'r') as f:
             return json.load(f)
-    return {"allowed_devices": ["esp12_sensor_1"], "default_threshold": 100}
+    return {"allowed_devices": ["esp12_sensor_1"]}
 
 config = load_config()
 ALLOWED_DEVICES = config.get("allowed_devices", ["esp12_sensor_1"])
-DEFAULT_THRESHOLD = 100
 
 esp_clients = {}
 web_clients = set()
-current_threshold = DEFAULT_THRESHOLD
 
 HTML_PAGE = """<!DOCTYPE html>
 <html>
@@ -120,6 +117,7 @@ HTML_PAGE = """<!DOCTYPE html>
             letter-spacing: 3px;
             transition: 0.3s;
             box-shadow: 0 5px 20px rgba(255,0,0,0.3);
+            margin: 10px;
         }
         
         .reset-btn:hover {
@@ -155,6 +153,7 @@ HTML_PAGE = """<!DOCTYPE html>
             gap: 10px;
             justify-content: center;
             margin: 15px 0;
+            flex-wrap: wrap;
         }
         
         .preset-btn {
@@ -175,6 +174,8 @@ HTML_PAGE = """<!DOCTYPE html>
         .preset-btn.active {
             background: #ffaa00;
             border-color: #ffaa00;
+            color: #000;
+            font-weight: bold;
         }
     </style>
 </head>
@@ -222,7 +223,7 @@ HTML_PAGE = """<!DOCTYPE html>
     <script>
         const wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
         let ws;
-        let currentThreshold = 100;
+        let ignoreNextUpdate = false; // Флаг чтобы не сбрасывать слайдер
         
         function connect() {
             ws = new WebSocket(wsUrl);
@@ -256,7 +257,7 @@ HTML_PAGE = """<!DOCTYPE html>
             const threshold = d.threshold || 100;
             
             distEl.textContent = dist.toFixed(1) + ' mm';
-            distEl.className = 'distance ' + (dist <= threshold ? 'near' : 'far');
+            distEl.className = 'distance ' + (dist > 0 && dist <= threshold ? 'near' : 'far');
             
             document.getElementById('rssi').textContent = (d.rssi || 0) + ' dBm';
             
@@ -266,33 +267,49 @@ HTML_PAGE = """<!DOCTYPE html>
             const s = uptime % 60;
             document.getElementById('uptime').textContent = h + 'h ' + m + 'm ' + s + 's';
             
-            // Обновляем слайдер если threshold поменялся
-            if (threshold !== currentThreshold) {
-                currentThreshold = threshold;
+            // Обновляем слайдер только если не мы его двигаем
+            if (!ignoreNextUpdate) {
                 document.getElementById('thresholdSlider').value = threshold;
                 document.getElementById('thresholdValue').textContent = threshold + ' mm';
+                updatePresetButtons(threshold);
             }
         }
         
-        // Слайдер дистанции
+        function updatePresetButtons(value) {
+            document.querySelectorAll('.preset-btn').forEach(btn => {
+                btn.classList.remove('active');
+                if (parseInt(btn.textContent) === value) {
+                    btn.classList.add('active');
+                }
+                // Для кнопок с "cm"
+                if (btn.textContent === '10cm' && value === 100) btn.classList.add('active');
+                if (btn.textContent === '20cm' && value === 200) btn.classList.add('active');
+                if (btn.textContent === '30cm' && value === 300) btn.classList.add('active');
+                if (btn.textContent === '50cm' && value === 500) btn.classList.add('active');
+            });
+        }
+        
+        // Слайдер
         document.getElementById('thresholdSlider').addEventListener('input', function(e) {
             const value = parseInt(e.target.value);
             document.getElementById('thresholdValue').textContent = value + ' mm';
+            updatePresetButtons(value);
         });
         
         document.getElementById('thresholdSlider').addEventListener('change', function(e) {
             const value = parseInt(e.target.value);
+            ignoreNextUpdate = true;
             sendThreshold(value);
+            setTimeout(() => { ignoreNextUpdate = false; }, 2000);
         });
         
         function setThreshold(value) {
             document.getElementById('thresholdSlider').value = value;
             document.getElementById('thresholdValue').textContent = value + ' mm';
+            updatePresetButtons(value);
+            ignoreNextUpdate = true;
             sendThreshold(value);
-            
-            // Обновляем пресеты
-            document.querySelectorAll('.preset-btn').forEach(btn => btn.classList.remove('active'));
-            event.target.classList.add('active');
+            setTimeout(() => { ignoreNextUpdate = false; }, 2000);
         }
         
         function sendThreshold(value) {
@@ -302,6 +319,7 @@ HTML_PAGE = """<!DOCTYPE html>
                     deviceId: 'esp12_sensor_1',
                     value: value
                 }));
+                console.log('Threshold sent: ' + value + 'mm');
             }
         }
         
@@ -311,6 +329,7 @@ HTML_PAGE = """<!DOCTYPE html>
                     type: 'reset',
                     deviceId: 'esp12_sensor_1'
                 }));
+                console.log('Reset sent');
             }
         }
         
@@ -349,14 +368,6 @@ async def handle_ws(request):
                         esp_clients[device_id] = ws
                         print(f"✅ ESP: {device_id}")
                         await ws.send_json({"type": "registered"})
-                        
-                        # Отправляем текущий порог
-                        threshold_cmd = json.dumps({
-                            "type": "command",
-                            "command": "set_threshold",
-                            "value": current_threshold
-                        })
-                        await ws.send_str(threshold_cmd)
                     
                     # Данные с датчика
                     elif data.get("type") == "sensor_data":
@@ -366,10 +377,6 @@ async def handle_ws(request):
                         touches = sensor.get("touch_count", 0)
                         dist = sensor.get("distance", 0)
                         threshold = sensor.get("threshold", 100)
-                        
-                        # Обновляем глобальный порог
-                        global current_threshold
-                        current_threshold = threshold
                         
                         print(f"📊 {device_id} | Touches: {touches} | Dist: {dist:.1f}mm | Thr: {threshold}mm")
                         
@@ -399,17 +406,14 @@ async def handle_ws(request):
                                     "type": "command",
                                     "command": "reset"
                                 }))
-                            except:
-                                pass
+                            except Exception as e:
+                                print(f"Reset error: {e}")
                     
                     # Изменение порога
                     elif data.get("type") == "set_threshold":
                         target = data.get("deviceId", "esp12_sensor_1")
-                        value = data.get("value", 100)
-                        print(f"📏 Threshold {target} -> {value}mm")
-                        
-                        global current_threshold
-                        current_threshold = value
+                        value = int(data.get("value", 100))
+                        print(f"📏 SET THRESHOLD: {value}mm for {target}")
                         
                         if target in esp_clients:
                             try:
@@ -418,8 +422,9 @@ async def handle_ws(request):
                                     "command": "set_threshold",
                                     "value": value
                                 }))
-                            except:
-                                pass
+                                print(f"✅ Threshold command sent: {value}mm")
+                            except Exception as e:
+                                print(f"Threshold error: {e}")
                     
                     # Веб-клиент
                     elif data.get("type") == "web_client":
