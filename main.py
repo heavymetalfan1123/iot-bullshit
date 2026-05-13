@@ -14,7 +14,7 @@ def load_config():
 
 config = load_config()
 ALLOWED_DEVICES = config.get("allowed_devices", ["esp12_sensor_1"])
-DEFAULT_THRESHOLD = config.get("default_threshold", 100)
+DEFAULT_THRESHOLD = 100
 
 esp_clients = {}
 web_clients = set()
