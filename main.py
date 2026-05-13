@@ -10,14 +10,15 @@ def load_config():
     if config_file.exists():
         with open(config_file, 'r') as f:
             return json.load(f)
-    return {"allowed_devices": ["esp12_sensor_1"]}
+    return {"allowed_devices": ["esp12_sensor_1"], "default_threshold": 100}
 
 config = load_config()
 ALLOWED_DEVICES = config.get("allowed_devices", ["esp12_sensor_1"])
+DEFAULT_THRESHOLD = config.get("default_threshold", 100)
 
 esp_clients = {}
 web_clients = set()
-current_threshold = 100  # Текущий порог
+current_threshold = DEFAULT_THRESHOLD
 
 HTML_PAGE = """<!DOCTYPE html>
 <html>
@@ -28,127 +29,114 @@ HTML_PAGE = """<!DOCTYPE html>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
-            font-family: Arial, sans-serif;
+            font-family: 'Arial', sans-serif;
             background: #0a0a0a;
-            color: white;
+            color: #fff;
             min-height: 100vh;
             display: flex;
             align-items: center;
             justify-content: center;
         }
-        .container { text-align: center; padding: 20px; width: 100%; max-width: 600px; }
-        
-        .counter-box {
-            background: rgba(255,0,255,0.1);
-            border: 2px solid rgba(255,0,255,0.3);
-            border-radius: 20px;
-            padding: 40px;
-            margin: 20px 0;
-        }
+        .container { text-align: center; padding: 40px; max-width: 600px; width: 100%; }
         
         .counter {
             font-size: 180px;
             font-weight: bold;
-            color: #ff00ff;
-            text-shadow: 0 0 40px rgba(255,0,255,0.5);
+            color: #ff6600;
+            text-shadow: 0 0 50px rgba(255,102,0,0.5), 0 0 100px rgba(255,102,0,0.3);
             line-height: 1;
+            margin: 20px 0;
         }
         
         .label {
             font-size: 20px;
             color: #888;
             letter-spacing: 5px;
-            margin-bottom: 10px;
+            text-transform: uppercase;
         }
         
-        .distance-display {
-            font-size: 60px;
-            font-weight: bold;
-            margin: 10px 0;
-            text-shadow: 0 0 20px rgba(0,255,255,0.5);
-        }
-        
-        .threshold-display {
-            font-size: 24px;
-            color: #888;
+        .distance {
+            font-size: 36px;
             margin: 10px 0;
         }
         
-        .threshold-display span {
-            color: #ffaa00;
-            font-weight: bold;
+        .distance.near { color: #ff0000; }
+        .distance.far { color: #00ff00; }
+        
+        .controls {
+            background: rgba(255,255,255,0.05);
+            border-radius: 20px;
+            padding: 30px;
+            margin: 30px 0;
         }
         
-        .threshold-slider {
-            width: 100%;
+        .slider-container {
             margin: 20px 0;
-            -webkit-appearance: none;
-            height: 15px;
-            background: linear-gradient(90deg, #00ff00, #ffaa00, #ff0000);
-            border-radius: 10px;
-            outline: none;
         }
         
-        .threshold-slider::-webkit-slider-thumb {
+        .slider-label {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 10px;
+            font-size: 14px;
+            color: #888;
+        }
+        
+        input[type="range"] {
+            width: 100%;
+            height: 8px;
+            border-radius: 5px;
+            background: linear-gradient(90deg, #00ff00, #ffaa00, #ff0000);
+            outline: none;
             -webkit-appearance: none;
-            width: 40px;
-            height: 40px;
-            background: white;
+        }
+        
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 30px;
+            height: 30px;
             border-radius: 50%;
+            background: white;
             cursor: pointer;
             box-shadow: 0 0 20px rgba(255,255,255,0.5);
         }
         
-        .slider-labels {
-            display: flex;
-            justify-content: space-between;
-            color: #666;
-            font-size: 14px;
-        }
-        
-        .buttons {
-            display: flex;
-            gap: 20px;
-            justify-content: center;
-            margin-top: 30px;
-        }
-        
-        .btn {
-            padding: 15px 40px;
-            font-size: 20px;
+        .threshold-display {
+            font-size: 48px;
             font-weight: bold;
+            color: #ffaa00;
+            margin: 10px 0;
+        }
+        
+        .reset-btn {
+            padding: 20px 60px;
+            font-size: 24px;
+            font-weight: bold;
+            background: #ff0000;
+            color: white;
             border: none;
             border-radius: 50px;
             cursor: pointer;
-            letter-spacing: 2px;
+            letter-spacing: 3px;
             transition: 0.3s;
-        }
-        
-        .btn-reset {
-            background: #ff0000;
-            color: white;
             box-shadow: 0 5px 20px rgba(255,0,0,0.3);
         }
         
-        .btn-reset:hover {
+        .reset-btn:hover {
             background: #ff3333;
             transform: translateY(-2px);
         }
         
-        .btn-apply {
-            background: #00aa00;
-            color: white;
-            box-shadow: 0 5px 20px rgba(0,255,0,0.3);
+        .reset-btn:active {
+            transform: scale(0.95);
         }
         
-        .btn-apply:hover {
-            background: #00cc00;
-            transform: translateY(-2px);
-        }
-        
-        .status {
+        .info-row {
+            display: flex;
+            justify-content: space-around;
             margin-top: 20px;
-            color: #888;
+            font-size: 14px;
+            color: #666;
         }
         
         .dot {
@@ -158,25 +146,35 @@ HTML_PAGE = """<!DOCTYPE html>
             border-radius: 50%;
             margin-right: 10px;
         }
+        
         .dot.online { background: #00ff00; box-shadow: 0 0 10px #00ff00; }
         .dot.offline { background: #ff0000; box-shadow: 0 0 10px #ff0000; }
         
-        .value-indicator {
-            height: 30px;
-            background: linear-gradient(90deg, #00ff00, #ffaa00, #ff0000);
-            border-radius: 15px;
-            margin: 10px 0;
-            transition: width 0.1s;
-            position: relative;
+        .preset-buttons {
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+            margin: 15px 0;
         }
         
-        .marker {
-            position: absolute;
-            top: -5px;
-            width: 4px;
-            height: 40px;
-            background: white;
-            box-shadow: 0 0 10px white;
+        .preset-btn {
+            padding: 10px 20px;
+            background: rgba(255,255,255,0.1);
+            border: 1px solid rgba(255,255,255,0.2);
+            color: white;
+            border-radius: 20px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: 0.3s;
+        }
+        
+        .preset-btn:hover {
+            background: rgba(255,255,255,0.2);
+        }
+        
+        .preset-btn.active {
+            background: #ffaa00;
+            border-color: #ffaa00;
         }
     </style>
 </head>
@@ -187,49 +185,44 @@ HTML_PAGE = """<!DOCTYPE html>
             <span style="color: #888;" id="connStatus">Connecting...</span>
         </div>
         
-        <div class="counter-box">
-            <div class="label">TOUCHES</div>
-            <div class="counter" id="counter">0</div>
+        <div class="label">Touch Counter</div>
+        <div class="counter" id="counter">0</div>
+        
+        <div class="distance" id="distDisplay">--- mm</div>
+        
+        <div class="controls">
+            <div style="font-size: 18px; color: #888; margin-bottom: 15px;">DISTANCE THRESHOLD</div>
+            
+            <div class="threshold-display" id="thresholdValue">100 mm</div>
+            
+            <div class="slider-container">
+                <div class="slider-label">
+                    <span>10mm</span>
+                    <span>500mm</span>
+                </div>
+                <input type="range" id="thresholdSlider" min="10" max="500" value="100" step="10">
+            </div>
+            
+            <div class="preset-buttons">
+                <button class="preset-btn active" onclick="setThreshold(100)">10cm</button>
+                <button class="preset-btn" onclick="setThreshold(200)">20cm</button>
+                <button class="preset-btn" onclick="setThreshold(300)">30cm</button>
+                <button class="preset-btn" onclick="setThreshold(500)">50cm</button>
+            </div>
         </div>
         
-        <div class="distance-display" id="distDisplay" style="color: #00ffff;">--- mm</div>
+        <button class="reset-btn" onclick="resetCounter()">RESET COUNTER</button>
         
-        <div class="value-indicator" id="valueBar" style="width: 0%;">
-            <div class="marker" id="thresholdMarker" style="left: 25%;"></div>
+        <div class="info-row">
+            <span>Signal: <span id="rssi">---</span></span>
+            <span>Uptime: <span id="uptime">0s</span></span>
         </div>
-        
-        <div class="threshold-display">
-            Touch distance: <span id="thresholdValue">100</span> mm
-        </div>
-        
-        <input type="range" class="threshold-slider" id="thresholdSlider" 
-               min="30" max="400" value="100" step="10">
-        
-        <div class="slider-labels">
-            <span>30mm</span>
-            <span>400mm</span>
-        </div>
-        
-        <div class="buttons">
-            <button class="btn btn-apply" onclick="setThreshold()">APPLY</button>
-            <button class="btn btn-reset" onclick="resetCounter()">RESET</button>
-        </div>
-        
-        <div class="status" id="statusMsg"></div>
     </div>
     
     <script>
         const wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
         let ws;
-        let deviceId = 'esp12_sensor_1';
         let currentThreshold = 100;
-        
-        // Обновление слайдера в реальном времени
-        document.getElementById('thresholdSlider').addEventListener('input', function() {
-            currentThreshold = parseInt(this.value);
-            document.getElementById('thresholdValue').textContent = currentThreshold;
-            document.getElementById('thresholdMarker').style.left = (currentThreshold / 400 * 100) + '%';
-        });
         
         function connect() {
             ws = new WebSocket(wsUrl);
@@ -245,10 +238,6 @@ HTML_PAGE = """<!DOCTYPE html>
                 
                 if (data.type === 'update') {
                     updateDisplay(data.data);
-                } else if (data.type === 'reset_confirm') {
-                    document.getElementById('counter').textContent = '0';
-                    showStatus('Counter reset!', '#00ff00');
-                    setTimeout(() => showStatus('', ''), 2000);
                 }
             };
             
@@ -260,50 +249,59 @@ HTML_PAGE = """<!DOCTYPE html>
         }
         
         function updateDisplay(d) {
-            const touches = d.touch_count || 0;
+            document.getElementById('counter').textContent = d.touch_count || 0;
+            
+            const distEl = document.getElementById('distDisplay');
             const dist = d.distance || 0;
             const threshold = d.threshold || 100;
             
-            // Счетчик
-            document.getElementById('counter').textContent = touches;
+            distEl.textContent = dist.toFixed(1) + ' mm';
+            distEl.className = 'distance ' + (dist <= threshold ? 'near' : 'far');
             
-            // Расстояние
-            const distEl = document.getElementById('distDisplay');
-            distEl.textContent = dist.toFixed(0) + ' mm';
+            document.getElementById('rssi').textContent = (d.rssi || 0) + ' dBm';
             
-            // Цвет в зависимости от близости к порогу
-            if (dist <= threshold) {
-                distEl.style.color = '#ff0000';
-            } else if (dist <= threshold * 1.5) {
-                distEl.style.color = '#ffaa00';
-            } else {
-                distEl.style.color = '#00ffff';
-            }
+            const uptime = d.uptime || 0;
+            const h = Math.floor(uptime / 3600);
+            const m = Math.floor((uptime % 3600) / 60);
+            const s = uptime % 60;
+            document.getElementById('uptime').textContent = h + 'h ' + m + 'm ' + s + 's';
             
-            // Бар дистанции
-            const barPercent = Math.min(dist / 400 * 100, 100);
-            document.getElementById('valueBar').style.width = barPercent + '%';
-            
-            // Обновляем порог если пришел новый
+            // Обновляем слайдер если threshold поменялся
             if (threshold !== currentThreshold) {
                 currentThreshold = threshold;
                 document.getElementById('thresholdSlider').value = threshold;
-                document.getElementById('thresholdValue').textContent = threshold;
-                document.getElementById('thresholdMarker').style.left = (threshold / 400 * 100) + '%';
+                document.getElementById('thresholdValue').textContent = threshold + ' mm';
             }
         }
         
-        function setThreshold() {
-            const newThreshold = parseInt(document.getElementById('thresholdSlider').value);
+        // Слайдер дистанции
+        document.getElementById('thresholdSlider').addEventListener('input', function(e) {
+            const value = parseInt(e.target.value);
+            document.getElementById('thresholdValue').textContent = value + ' mm';
+        });
+        
+        document.getElementById('thresholdSlider').addEventListener('change', function(e) {
+            const value = parseInt(e.target.value);
+            sendThreshold(value);
+        });
+        
+        function setThreshold(value) {
+            document.getElementById('thresholdSlider').value = value;
+            document.getElementById('thresholdValue').textContent = value + ' mm';
+            sendThreshold(value);
             
+            // Обновляем пресеты
+            document.querySelectorAll('.preset-btn').forEach(btn => btn.classList.remove('active'));
+            event.target.classList.add('active');
+        }
+        
+        function sendThreshold(value) {
             if (ws && ws.readyState === WebSocket.OPEN) {
                 ws.send(JSON.stringify({
                     type: 'set_threshold',
-                    deviceId: deviceId,
-                    value: newThreshold
+                    deviceId: 'esp12_sensor_1',
+                    value: value
                 }));
-                showStatus('Threshold set to ' + newThreshold + 'mm', '#00ff00');
-                setTimeout(() => showStatus('', ''), 2000);
             }
         }
         
@@ -311,15 +309,9 @@ HTML_PAGE = """<!DOCTYPE html>
             if (ws && ws.readyState === WebSocket.OPEN) {
                 ws.send(JSON.stringify({
                     type: 'reset',
-                    deviceId: deviceId
+                    deviceId: 'esp12_sensor_1'
                 }));
             }
-        }
-        
-        function showStatus(msg, color) {
-            const el = document.getElementById('statusMsg');
-            el.textContent = msg;
-            el.style.color = color;
         }
         
         connect();
@@ -357,6 +349,14 @@ async def handle_ws(request):
                         esp_clients[device_id] = ws
                         print(f"✅ ESP: {device_id}")
                         await ws.send_json({"type": "registered"})
+                        
+                        # Отправляем текущий порог
+                        threshold_cmd = json.dumps({
+                            "type": "command",
+                            "command": "set_threshold",
+                            "value": current_threshold
+                        })
+                        await ws.send_str(threshold_cmd)
                     
                     # Данные с датчика
                     elif data.get("type") == "sensor_data":
@@ -367,13 +367,14 @@ async def handle_ws(request):
                         dist = sensor.get("distance", 0)
                         threshold = sensor.get("threshold", 100)
                         
+                        # Обновляем глобальный порог
                         global current_threshold
                         current_threshold = threshold
                         
-                        print(f"📊 {device_id} | Touches: {touches} | Dist: {dist:.0f}mm | Thr: {threshold}mm")
+                        print(f"📊 {device_id} | Touches: {touches} | Dist: {dist:.1f}mm | Thr: {threshold}mm")
                         
                         # Рассылаем веб-клиентам
-                        msg_data = json.dumps({
+                        update_msg = json.dumps({
                             "type": "update",
                             "deviceId": device_id,
                             "data": sensor
@@ -382,7 +383,7 @@ async def handle_ws(request):
                         dead = set()
                         for client in web_clients.copy():
                             try:
-                                await client.send_str(msg_data)
+                                await client.send_str(update_msg)
                             except:
                                 dead.add(client)
                         web_clients.difference_update(dead)
@@ -390,21 +391,14 @@ async def handle_ws(request):
                     # Сброс счетчика
                     elif data.get("type") == "reset":
                         target = data.get("deviceId", "esp12_sensor_1")
-                        print(f"🔄 Reset: {target}")
+                        print(f"🔄 RESET {target}")
                         
                         if target in esp_clients:
-                            reset_cmd = json.dumps({
-                                "type": "command",
-                                "command": "reset"
-                            })
-                            await esp_clients[target].send_str(reset_cmd)
-                            print("✅ Reset sent to ESP")
-                        
-                        # Подтверждение веб-клиентам
-                        confirm = json.dumps({"type": "reset_confirm"})
-                        for client in web_clients.copy():
                             try:
-                                await client.send_str(confirm)
+                                await esp_clients[target].send_str(json.dumps({
+                                    "type": "command",
+                                    "command": "reset"
+                                }))
                             except:
                                 pass
                     
@@ -412,16 +406,20 @@ async def handle_ws(request):
                     elif data.get("type") == "set_threshold":
                         target = data.get("deviceId", "esp12_sensor_1")
                         value = data.get("value", 100)
-                        print(f"📏 Set threshold: {value}mm for {target}")
+                        print(f"📏 Threshold {target} -> {value}mm")
+                        
+                        global current_threshold
+                        current_threshold = value
                         
                         if target in esp_clients:
-                            threshold_cmd = json.dumps({
-                                "type": "command",
-                                "command": "set_threshold",
-                                "value": value
-                            })
-                            await esp_clients[target].send_str(threshold_cmd)
-                            print(f"✅ Threshold sent to ESP")
+                            try:
+                                await esp_clients[target].send_str(json.dumps({
+                                    "type": "command",
+                                    "command": "set_threshold",
+                                    "value": value
+                                }))
+                            except:
+                                pass
                     
                     # Веб-клиент
                     elif data.get("type") == "web_client":
@@ -438,7 +436,6 @@ async def handle_ws(request):
         if client_type == "esp" and device_id:
             if device_id in esp_clients:
                 del esp_clients[device_id]
-            print(f"❌ ESP: {device_id}")
         elif client_type == "web":
             web_clients.discard(ws)
     
