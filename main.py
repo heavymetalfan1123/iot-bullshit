@@ -40,9 +40,15 @@ HTML_PAGE = """<!DOCTYPE html>
             font-size: 180px;
             font-weight: bold;
             color: #ff6600;
-            text-shadow: 0 0 50px rgba(255,102,0,0.5), 0 0 100px rgba(255,102,0,0.3);
+            text-shadow: 0 0 50px rgba(255,102,0,0.5);
             line-height: 1;
             margin: 20px 0;
+            transition: color 0.3s;
+        }
+        
+        .counter.reset-flash {
+            color: #00ff00 !important;
+            text-shadow: 0 0 50px rgba(0,255,0,0.8) !important;
         }
         
         .label {
@@ -67,9 +73,7 @@ HTML_PAGE = """<!DOCTYPE html>
             margin: 30px 0;
         }
         
-        .slider-container {
-            margin: 20px 0;
-        }
+        .slider-container { margin: 20px 0; }
         
         .slider-label {
             display: flex;
@@ -120,14 +124,8 @@ HTML_PAGE = """<!DOCTYPE html>
             margin: 10px;
         }
         
-        .reset-btn:hover {
-            background: #ff3333;
-            transform: translateY(-2px);
-        }
-        
-        .reset-btn:active {
-            transform: scale(0.95);
-        }
+        .reset-btn:hover { background: #ff3333; transform: translateY(-2px); }
+        .reset-btn:active { transform: scale(0.95); }
         
         .info-row {
             display: flex;
@@ -167,9 +165,7 @@ HTML_PAGE = """<!DOCTYPE html>
             transition: 0.3s;
         }
         
-        .preset-btn:hover {
-            background: rgba(255,255,255,0.2);
-        }
+        .preset-btn:hover { background: rgba(255,255,255,0.2); }
         
         .preset-btn.active {
             background: #ffaa00;
@@ -223,7 +219,7 @@ HTML_PAGE = """<!DOCTYPE html>
     <script>
         const wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
         let ws;
-        let ignoreNextUpdate = false; // Флаг чтобы не сбрасывать слайдер
+        let ignoreNextUpdate = false;
         
         function connect() {
             ws = new WebSocket(wsUrl);
@@ -236,9 +232,17 @@ HTML_PAGE = """<!DOCTYPE html>
             
             ws.onmessage = (event) => {
                 const data = JSON.parse(event.data);
+                console.log('Received:', data);
                 
                 if (data.type === 'update') {
                     updateDisplay(data.data);
+                } else if (data.type === 'reset_confirm') {
+                    // Анимация сброса
+                    const counter = document.getElementById('counter');
+                    counter.textContent = '0';
+                    counter.classList.add('reset-flash');
+                    setTimeout(() => counter.classList.remove('reset-flash'), 500);
+                    console.log('Reset confirmed by ESP!');
                 }
             };
             
@@ -267,33 +271,25 @@ HTML_PAGE = """<!DOCTYPE html>
             const s = uptime % 60;
             document.getElementById('uptime').textContent = h + 'h ' + m + 'm ' + s + 's';
             
-            // Обновляем слайдер только если не мы его двигаем
             if (!ignoreNextUpdate) {
                 document.getElementById('thresholdSlider').value = threshold;
                 document.getElementById('thresholdValue').textContent = threshold + ' mm';
-                updatePresetButtons(threshold);
+                updatePresets(threshold);
             }
         }
         
-        function updatePresetButtons(value) {
+        function updatePresets(value) {
             document.querySelectorAll('.preset-btn').forEach(btn => {
                 btn.classList.remove('active');
-                if (parseInt(btn.textContent) === value) {
-                    btn.classList.add('active');
-                }
-                // Для кнопок с "cm"
-                if (btn.textContent === '10cm' && value === 100) btn.classList.add('active');
-                if (btn.textContent === '20cm' && value === 200) btn.classList.add('active');
-                if (btn.textContent === '30cm' && value === 300) btn.classList.add('active');
-                if (btn.textContent === '50cm' && value === 500) btn.classList.add('active');
+                const btnVal = parseInt(btn.getAttribute('onclick').match(/\d+/)[0]);
+                if (btnVal === value) btn.classList.add('active');
             });
         }
         
-        // Слайдер
         document.getElementById('thresholdSlider').addEventListener('input', function(e) {
             const value = parseInt(e.target.value);
             document.getElementById('thresholdValue').textContent = value + ' mm';
-            updatePresetButtons(value);
+            updatePresets(value);
         });
         
         document.getElementById('thresholdSlider').addEventListener('change', function(e) {
@@ -306,7 +302,7 @@ HTML_PAGE = """<!DOCTYPE html>
         function setThreshold(value) {
             document.getElementById('thresholdSlider').value = value;
             document.getElementById('thresholdValue').textContent = value + ' mm';
-            updatePresetButtons(value);
+            updatePresets(value);
             ignoreNextUpdate = true;
             sendThreshold(value);
             setTimeout(() => { ignoreNextUpdate = false; }, 2000);
@@ -319,7 +315,6 @@ HTML_PAGE = """<!DOCTYPE html>
                     deviceId: 'esp12_sensor_1',
                     value: value
                 }));
-                console.log('Threshold sent: ' + value + 'mm');
             }
         }
         
@@ -329,7 +324,7 @@ HTML_PAGE = """<!DOCTYPE html>
                     type: 'reset',
                     deviceId: 'esp12_sensor_1'
                 }));
-                console.log('Reset sent');
+                console.log('RESET sent to server');
             }
         }
         
@@ -348,15 +343,16 @@ async def handle_ws(request):
     client_type = None
     device_id = None
     
-    print("🔌 New connection")
+    print("🔌 New WebSocket connection")
     
     try:
         async for msg in ws:
             if msg.type == web.WSMsgType.TEXT:
                 try:
                     data = json.loads(msg.data)
+                    print(f"📨 Received: {data}")
                     
-                    # Регистрация ESP
+                    # ESP регистрация
                     if data.get("type") == "register":
                         device_id = data.get("deviceId", "")
                         
@@ -366,24 +362,16 @@ async def handle_ws(request):
                         
                         client_type = "esp"
                         esp_clients[device_id] = ws
-                        print(f"✅ ESP: {device_id}")
+                        print(f"✅ ESP connected: {device_id}")
                         await ws.send_json({"type": "registered"})
                     
                     # Данные с датчика
                     elif data.get("type") == "sensor_data":
-                        device_id = data.get("deviceId", "unknown")
                         sensor = data.get("data", {})
-                        
-                        touches = sensor.get("touch_count", 0)
-                        dist = sensor.get("distance", 0)
-                        threshold = sensor.get("threshold", 100)
-                        
-                        print(f"📊 {device_id} | Touches: {touches} | Dist: {dist:.1f}mm | Thr: {threshold}mm")
                         
                         # Рассылаем веб-клиентам
                         update_msg = json.dumps({
                             "type": "update",
-                            "deviceId": device_id,
                             "data": sensor
                         })
                         
@@ -395,36 +383,52 @@ async def handle_ws(request):
                                 dead.add(client)
                         web_clients.difference_update(dead)
                     
-                    # Сброс счетчика
+                    # Сброс от веб-клиента
                     elif data.get("type") == "reset":
                         target = data.get("deviceId", "esp12_sensor_1")
-                        print(f"🔄 RESET {target}")
+                        print(f"🔄 RESET command for {target}")
                         
                         if target in esp_clients:
                             try:
-                                await esp_clients[target].send_str(json.dumps({
+                                reset_cmd = json.dumps({
                                     "type": "command",
                                     "command": "reset"
-                                }))
+                                })
+                                await esp_clients[target].send_str(reset_cmd)
+                                print(f"✅ Reset sent to {target}")
                             except Exception as e:
-                                print(f"Reset error: {e}")
+                                print(f"❌ Error sending reset: {e}")
+                        else:
+                            print(f"❌ Device {target} not connected!")
                     
                     # Изменение порога
                     elif data.get("type") == "set_threshold":
                         target = data.get("deviceId", "esp12_sensor_1")
                         value = int(data.get("value", 100))
-                        print(f"📏 SET THRESHOLD: {value}mm for {target}")
+                        print(f"📏 Threshold {value}mm for {target}")
                         
                         if target in esp_clients:
                             try:
-                                await esp_clients[target].send_str(json.dumps({
+                                threshold_cmd = json.dumps({
                                     "type": "command",
                                     "command": "set_threshold",
                                     "value": value
-                                }))
-                                print(f"✅ Threshold command sent: {value}mm")
+                                })
+                                await esp_clients[target].send_str(threshold_cmd)
+                                print(f"✅ Threshold sent: {value}mm")
                             except Exception as e:
-                                print(f"Threshold error: {e}")
+                                print(f"❌ Error: {e}")
+                    
+                    # Подтверждение сброса от ESP
+                    elif data.get("type") == "reset_confirm":
+                        print(f"✅ ESP confirmed reset!")
+                        # Пересылаем веб-клиентам
+                        confirm = json.dumps({"type": "reset_confirm"})
+                        for client in web_clients.copy():
+                            try:
+                                await client.send_str(confirm)
+                            except:
+                                pass
                     
                     # Веб-клиент
                     elif data.get("type") == "web_client":
@@ -433,7 +437,7 @@ async def handle_ws(request):
                         print(f"🌐 Web client (total: {len(web_clients)})")
                 
                 except Exception as e:
-                    print(f"Error: {e}")
+                    print(f"Error processing message: {e}")
     
     except Exception as e:
         print(f"Connection error: {e}")
@@ -441,8 +445,10 @@ async def handle_ws(request):
         if client_type == "esp" and device_id:
             if device_id in esp_clients:
                 del esp_clients[device_id]
+            print(f"❌ ESP disconnected: {device_id}")
         elif client_type == "web":
             web_clients.discard(ws)
+            print(f"🌐 Web client left")
     
     return ws
 
@@ -452,5 +458,6 @@ if __name__ == '__main__':
     app.router.add_get('/ws', handle_ws)
     
     port = int(os.environ.get('PORT', 8000))
-    print(f"Server on port {port}")
+    print(f"Server starting on port {port}")
+    print(f"Allowed devices: {ALLOWED_DEVICES}")
     web.run_app(app, port=port)
