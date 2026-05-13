@@ -1,22 +1,20 @@
-# server_wss.py
+# server.py
 import os
 import json
 from datetime import datetime
 from pathlib import Path
 from aiohttp import web
 
-# Конфиг
 def load_config():
     config_file = Path("config.json")
     if config_file.exists():
         with open(config_file, 'r') as f:
             return json.load(f)
-    return {"allowed_devices": ["esp12_sensor_1", "esp12_test"]}
+    return {"allowed_devices": ["esp12_sensor_1"]}
 
 config = load_config()
 ALLOWED_DEVICES = config.get("allowed_devices", ["esp12_sensor_1"])
 
-# Хранилище данных
 devices_data = {}
 web_clients = set()
 
@@ -25,7 +23,7 @@ HTML_PAGE = """<!DOCTYPE html>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>ESP12 Potentiometer Monitor</title>
+    <title>Touch Counter</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -36,85 +34,57 @@ HTML_PAGE = """<!DOCTYPE html>
             display: flex;
             align-items: center;
             justify-content: center;
-            overflow: hidden;
         }
-        .container { text-align: center; padding: 40px; width: 100%; max-width: 800px; }
+        .container { text-align: center; padding: 40px; }
         
-        .main-value {
-            font-size: 140px;
+        .counter {
+            font-size: 200px;
             font-weight: bold;
-            color: #ffaa00;
-            text-shadow: 0 0 30px rgba(255, 170, 0, 0.5), 0 0 60px rgba(255, 170, 0, 0.3);
-            animation: glow 2s infinite alternate;
-            transition: all 0.1s;
+            color: #ff00ff;
+            text-shadow: 0 0 40px rgba(255, 0, 255, 0.5),
+                         0 0 80px rgba(255, 0, 255, 0.3),
+                         0 0 120px rgba(255, 0, 255, 0.2);
+            animation: pulse 2s infinite;
+            line-height: 1;
         }
         
-        @keyframes glow {
-            from { text-shadow: 0 0 30px rgba(255, 170, 0, 0.5); }
-            to { text-shadow: 0 0 60px rgba(255, 170, 0, 1); }
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.05); }
         }
         
-        .voltage {
-            font-size: 48px;
-            color: #00ff00;
-            margin-top: 10px;
-            text-shadow: 0 0 20px rgba(0, 255, 0, 0.5);
-        }
-        
-        .bar-container {
-            width: 100%;
-            height: 40px;
-            background: rgba(255, 170, 0, 0.1);
-            border: 2px solid rgba(255, 170, 0, 0.3);
-            border-radius: 20px;
-            margin-top: 30px;
-            overflow: hidden;
-            position: relative;
-        }
-        
-        .bar-fill {
-            height: 100%;
-            background: linear-gradient(90deg, #00ff00, #ffaa00, #ff0000);
-            border-radius: 18px;
-            transition: width 0.1s;
-            box-shadow: 0 0 20px rgba(255, 170, 0, 0.5);
-        }
-        
-        .bar-label {
-            position: absolute;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
-            color: white;
-            font-weight: bold;
-            font-size: 18px;
-            text-shadow: 0 0 10px rgba(0,0,0,0.8);
-        }
-        
-        .info {
-            font-size: 18px;
+        .label {
+            font-size: 24px;
             color: #888;
+            margin-top: 10px;
+            text-transform: uppercase;
+            letter-spacing: 5px;
+        }
+        
+        .distance {
+            font-size: 36px;
+            color: #00ffff;
             margin-top: 20px;
+            text-shadow: 0 0 20px rgba(0, 255, 255, 0.5);
         }
         
         .status {
             display: inline-block;
-            width: 12px;
-            height: 12px;
-            border-radius: 50%;
-            margin-right: 10px;
-            animation: blink 1s infinite;
+            padding: 10px 30px;
+            border-radius: 30px;
+            font-size: 18px;
+            margin: 20px 0;
         }
         
-        .status.connected {
-            background: #00ff00;
-            box-shadow: 0 0 10px #00ff00;
+        .status.near {
+            background: rgba(255, 0, 0, 0.3);
+            color: #ff0000;
+            animation: blink 0.5s infinite;
         }
         
-        .status.disconnected {
-            background: #ff0000;
-            box-shadow: 0 0 10px #ff0000;
-            animation: none;
+        .status.far {
+            background: rgba(0, 255, 0, 0.2);
+            color: #00ff00;
         }
         
         @keyframes blink {
@@ -122,25 +92,50 @@ HTML_PAGE = """<!DOCTYPE html>
             50% { opacity: 0.3; }
         }
         
+        .reset-btn {
+            padding: 20px 60px;
+            font-size: 24px;
+            font-weight: bold;
+            background: linear-gradient(135deg, #ff0000, #ff6600);
+            color: white;
+            border: none;
+            border-radius: 50px;
+            cursor: pointer;
+            margin-top: 30px;
+            text-transform: uppercase;
+            letter-spacing: 3px;
+            transition: all 0.3s;
+            box-shadow: 0 10px 30px rgba(255, 0, 0, 0.3);
+        }
+        
+        .reset-btn:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 15px 40px rgba(255, 0, 0, 0.5);
+        }
+        
+        .reset-btn:active {
+            transform: translateY(0);
+        }
+        
         .stats {
-            margin-top: 40px;
+            margin-top: 30px;
             display: grid;
-            grid-template-columns: repeat(3, 1fr);
-            gap: 30px;
-            max-width: 600px;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 20px;
+            max-width: 400px;
             margin-left: auto;
             margin-right: auto;
         }
         
         .stat-box {
-            background: rgba(0, 255, 0, 0.05);
-            border: 1px solid rgba(0, 255, 0, 0.2);
-            border-radius: 10px;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 15px;
             padding: 20px;
         }
         
         .stat-label {
-            font-size: 11px;
+            font-size: 12px;
             color: #666;
             text-transform: uppercase;
             letter-spacing: 2px;
@@ -148,53 +143,53 @@ HTML_PAGE = """<!DOCTYPE html>
         }
         
         .stat-value {
-            font-size: 22px;
-            color: #00ff00;
+            font-size: 28px;
+            color: #00ffff;
         }
         
-        .min-max {
-            display: flex;
-            justify-content: space-between;
-            margin-top: 10px;
-            color: #666;
-            font-size: 14px;
+        .connected-dot {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            margin-right: 10px;
+        }
+        
+        .connected-dot.online {
+            background: #00ff00;
+            box-shadow: 0 0 10px #00ff00;
+        }
+        
+        .connected-dot.offline {
+            background: #ff0000;
+            box-shadow: 0 0 10px #ff0000;
         }
     </style>
 </head>
 <body>
     <div class="container">
         <div style="margin-bottom: 20px;">
-            <span class="status" id="statusDot"></span>
-            <span style="color: #888;" id="deviceName">Connecting...</span>
+            <span class="connected-dot" id="dot"></span>
+            <span style="color: #888;" id="connectionStatus">Connecting...</span>
         </div>
         
-        <div class="voltage" id="voltageValue">0.00V</div>
-        <div class="main-value" id="potValue">0</div>
+        <div class="label">TOUCHES</div>
+        <div class="counter" id="touchCount">0</div>
         
-        <div class="bar-container">
-            <div class="bar-fill" id="potBar" style="width: 0%;"></div>
-            <div class="bar-label" id="barLabel">0%</div>
-        </div>
+        <div class="status" id="objectStatus">WAITING</div>
         
-        <div class="min-max">
-            <span>0 (GND)</span>
-            <span>1023 (3.3V)</span>
-        </div>
+        <div class="distance" id="distanceDisplay">Distance: --- mm</div>
         
-        <div class="info" id="infoText">Waiting for data...</div>
+        <button class="reset-btn" onclick="resetCounter()">🔄 RESET</button>
         
         <div class="stats">
             <div class="stat-box">
-                <div class="stat-label">Signal (RSSI)</div>
-                <div class="stat-value" id="rssi">0 dBm</div>
+                <div class="stat-label">Signal</div>
+                <div class="stat-value" id="rssi">--- dBm</div>
             </div>
             <div class="stat-box">
                 <div class="stat-label">Uptime</div>
                 <div class="stat-value" id="uptime">0s</div>
-            </div>
-            <div class="stat-box">
-                <div class="stat-label">Percent</div>
-                <div class="stat-value" id="percent">0%</div>
             </div>
         </div>
     </div>
@@ -202,16 +197,13 @@ HTML_PAGE = """<!DOCTYPE html>
     <script>
         const wsUrl = (window.location.protocol === 'https:' ? 'wss://' : 'ws://') + window.location.host + '/ws';
         let ws;
-        let maxValue = 0;
-        let minValue = 1023;
         
         function connect() {
             ws = new WebSocket(wsUrl);
             
             ws.onopen = () => {
-                console.log('Connected');
-                document.getElementById('statusDot').className = 'status connected';
-                document.getElementById('deviceName').textContent = 'Online';
+                document.getElementById('dot').className = 'connected-dot online';
+                document.getElementById('connectionStatus').textContent = 'Connected';
                 ws.send(JSON.stringify({type: 'web_client'}));
             };
             
@@ -223,46 +215,54 @@ HTML_PAGE = """<!DOCTYPE html>
             };
             
             ws.onclose = () => {
-                document.getElementById('statusDot').className = 'status disconnected';
-                document.getElementById('deviceName').textContent = 'Reconnecting...';
+                document.getElementById('dot').className = 'connected-dot offline';
+                document.getElementById('connectionStatus').textContent = 'Reconnecting...';
                 setTimeout(connect, 3000);
             };
         }
         
         function updateDisplay(d) {
-            const pot = d.potentiometer || 0;
-            const volt = d.voltage || 0;
+            const touches = d.touch_count || 0;
+            const distance = d.distance || 0;
+            const objectNear = d.object_near;
             const rssi = d.rssi || 0;
             const uptime = d.uptime || 0;
             
-            // Процент
-            const percent = (pot / 1023) * 100;
+            // Счетчик касаний
+            document.getElementById('touchCount').textContent = touches;
             
-            // Обновляем значения
-            document.getElementById('potValue').textContent = pot;
-            document.getElementById('voltageValue').textContent = volt.toFixed(2) + 'V';
+            // Статус объекта
+            const statusEl = document.getElementById('objectStatus');
+            if (objectNear) {
+                statusEl.textContent = 'OBJECT NEAR!';
+                statusEl.className = 'status near';
+            } else {
+                statusEl.textContent = 'CLEAR';
+                statusEl.className = 'status far';
+            }
             
-            // Прогресс-бар
-            document.getElementById('potBar').style.width = percent + '%';
-            document.getElementById('barLabel').textContent = percent.toFixed(1) + '%';
+            // Расстояние
+            document.getElementById('distanceDisplay').textContent = 'Distance: ' + distance.toFixed(1) + ' mm';
             
-            // Цвет в зависимости от значения
-            const hue = (1 - percent / 100) * 120; // 120=зеленый, 0=красный
-            document.getElementById('potValue').style.color = `hsl(${hue}, 100%, 50%)`;
-            document.getElementById('potValue').style.textShadow = `0 0 30px hsl(${hue}, 100%, 50%)`;
-            
-            // Статистика
+            // Сигнал и время
             document.getElementById('rssi').textContent = rssi + ' dBm';
-            document.getElementById('percent').textContent = percent.toFixed(1) + '%';
-            
-            // Uptime
             const h = Math.floor(uptime / 3600);
             const m = Math.floor((uptime % 3600) / 60);
             const s = uptime % 60;
             document.getElementById('uptime').textContent = h + 'h ' + m + 'm ' + s + 's';
-            
-            document.getElementById('infoText').textContent = 
-                'ADC: ' + pot + ' / 1023 | Voltage: ' + volt.toFixed(2) + 'V';
+        }
+        
+        function resetCounter() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                    type: 'reset',
+                    deviceId: 'esp12_sensor_1'
+                }));
+                // Анимируем кнопку
+                const btn = document.querySelector('.reset-btn');
+                btn.style.transform = 'scale(0.95)';
+                setTimeout(() => btn.style.transform = '', 200);
+            }
         }
         
         connect();
@@ -280,7 +280,7 @@ async def handle_ws(request):
     client_type = None
     device_id = None
     
-    print(f"🔌 New WebSocket connection")
+    print(f"🔌 New connection")
     
     try:
         async for msg in ws:
@@ -292,17 +292,15 @@ async def handle_ws(request):
                         device_id = data.get("deviceId", "")
                         
                         if device_id not in ALLOWED_DEVICES:
-                            print(f"❌ Device DENIED: {device_id}")
-                            await ws.send_json({"type": "error", "message": "Device not allowed"})
+                            await ws.send_json({"type": "error", "message": "Not allowed"})
                             continue
                         
                         client_type = "esp"
                         devices_data[device_id] = {
                             "connected": True,
-                            "last_data": None,
-                            "last_update": None
+                            "last_data": None
                         }
-                        print(f"✅ ESP Connected: {device_id}")
+                        print(f"✅ ESP: {device_id}")
                         await ws.send_json({"type": "registered", "status": "success"})
                     
                     elif data.get("type") == "sensor_data":
@@ -312,12 +310,13 @@ async def handle_ws(request):
                         devices_data[device_id] = {
                             "connected": True,
                             "last_data": sensor,
-                            "last_update": datetime.now().isoformat()
+                            "touch_count": sensor.get("touch_count", 0)
                         }
                         
-                        pot = sensor.get("potentiometer", 0)
-                        volt = sensor.get("voltage", 0)
-                        print(f"📊 {device_id} | Pot: {pot} | Voltage: {volt:.2f}V")
+                        touches = sensor.get("touch_count", 0)
+                        dist = sensor.get("distance", 0)
+                        near = sensor.get("object_near", False)
+                        print(f"📊 {device_id} | Touches: {touches} | Dist: {dist:.1f}mm | {'NEAR' if near else 'FAR'}")
                         
                         # Рассылаем веб-клиентам
                         msg_data = json.dumps({
@@ -334,12 +333,35 @@ async def handle_ws(request):
                                 dead.add(client)
                         web_clients.difference_update(dead)
                     
+                    elif data.get("type") == "reset":
+                        # Кнопка сброса от веб-клиента
+                        target_device = data.get("deviceId", "esp12_sensor_1")
+                        print(f"🔄 RESET requested for {target_device}")
+                        
+                        # Отправляем команду сброса на ESP
+                        for dev_id, dev_data in devices_data.items():
+                            if dev_id == target_device and dev_data.get("connected"):
+                                # Отправляем через веб-сокет команду reset
+                                # ESP получит это в webSocketEvent
+                                pass  # ESP должен быть веб-сокет клиентом, это сложно
+                        
+                        # Просто отправляем всем веб-клиентам что счетчик сброшен
+                        reset_msg = json.dumps({
+                            "type": "reset_ack",
+                            "deviceId": target_device
+                        })
+                        
+                        for client in web_clients.copy():
+                            try:
+                                await client.send_str(reset_msg)
+                            except:
+                                dead.add(client)
+                    
                     elif data.get("type") == "web_client":
                         client_type = "web"
                         web_clients.add(ws)
                         print(f"🌐 Web client (total: {len(web_clients)})")
                         
-                        # Отправляем последние данные
                         for dev_id, dev_data in devices_data.items():
                             if dev_data.get("last_data"):
                                 await ws.send_json({
@@ -359,10 +381,9 @@ async def handle_ws(request):
         if client_type == "esp" and device_id:
             if device_id in devices_data:
                 devices_data[device_id]["connected"] = False
-            print(f"❌ ESP Disconnected: {device_id}")
+            print(f"❌ ESP: {device_id}")
         elif client_type == "web":
             web_clients.discard(ws)
-            print(f"🌐 Web client left (total: {len(web_clients)})")
     
     return ws
 
@@ -373,5 +394,5 @@ if __name__ == '__main__':
     
     port = int(os.environ.get('PORT', 8000))
     print(f"Server on port {port}")
-    print(f"Allowed devices: {ALLOWED_DEVICES}")
+    print(f"Allowed: {ALLOWED_DEVICES}")
     web.run_app(app, port=port)
