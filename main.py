@@ -34,7 +34,7 @@ HTML_PAGE = """<!DOCTYPE html>
             align-items: center;
             justify-content: center;
         }
-        .container { text-align: center; padding: 40px; max-width: 600px; width: 100%; }
+        .container { text-align: center; padding: 40px; max-width: 500px; width: 100%; }
         
         .status-circle {
             width: 180px;
@@ -92,13 +92,6 @@ HTML_PAGE = """<!DOCTYPE html>
         }
         
         .distance-display span { color: #00ffff; }
-        
-        .controls {
-            background: rgba(255,255,255,0.03);
-            border-radius: 20px;
-            padding: 25px;
-            margin: 25px 0;
-        }
         
         .arm-btn {
             width: 100%;
@@ -173,23 +166,10 @@ HTML_PAGE = """<!DOCTYPE html>
             margin: 10px 0;
         }
         
-        .reset-btn {
-            padding: 12px 30px;
-            font-size: 14px;
-            background: rgba(255,255,255,0.05);
-            border: 1px solid rgba(255,255,255,0.2);
-            color: #888;
-            border-radius: 10px;
-            cursor: pointer;
-            transition: all 0.3s;
-        }
-        
-        .reset-btn:hover { background: rgba(255,255,255,0.1); color: #fff; }
-        
         .info-row {
             display: flex;
-            justify-content: space-between;
-            margin-top: 15px;
+            justify-content: space-around;
+            margin-top: 20px;
             font-size: 12px;
             color: #555;
         }
@@ -213,38 +193,30 @@ HTML_PAGE = """<!DOCTYPE html>
             <span style="color: #888; font-size: 12px;" id="connStatus">Connecting...</span>
         </div>
         
-        <div class="status-circle disarmed" id="statusCircle">
-            DISARMED
-        </div>
+        <div class="status-circle disarmed" id="statusCircle">DISARMED</div>
         
-        <div class="alarm-count" id="alarmCount" style="display: none;">
-            🚨 ALARMS: 0
-        </div>
+        <div class="alarm-count" id="alarmCount" style="display: none;">🚨 ALARMS: 0</div>
         
         <div class="distance-display">
             Distance: <span id="distDisplay">--- cm</span>
         </div>
         
-        <div class="controls">
-            <button class="arm-btn arm" id="armBtn" onclick="toggleArm()">
-                🔒 ARM SYSTEM
-            </button>
-            
-            <div class="section-title">DETECTION RANGE</div>
-            
-            <div class="dist-value" id="thresholdDisplay">200 cm</div>
-            
-            <div class="distance-buttons">
-                <button class="dist-btn" onclick="setDistance(100)">1m</button>
-                <button class="dist-btn" onclick="setDistance(150)">1.5m</button>
-                <button class="dist-btn" onclick="setDistance(200)">2m</button>
-                <button class="dist-btn" onclick="setDistance(300)">3m</button>
-                <button class="dist-btn" onclick="setDistance(400)">4m</button>
-                <button class="dist-btn" onclick="setDistance(500)">5m</button>
-            </div>
-        </div>
+        <button class="arm-btn arm" id="armBtn" onclick="toggleArm()">
+            🔒 ARM SYSTEM
+        </button>
         
-        <button class="reset-btn" onclick="resetAlarms()">🔄 Reset Counter</button>
+        <div class="section-title">DETECTION RANGE</div>
+        
+        <div class="dist-value" id="thresholdDisplay">200 cm</div>
+        
+        <div class="distance-buttons">
+            <button class="dist-btn active" onclick="setDistance(100)">1m</button>
+            <button class="dist-btn" onclick="setDistance(150)">1.5m</button>
+            <button class="dist-btn" onclick="setDistance(200)">2m</button>
+            <button class="dist-btn" onclick="setDistance(300)">3m</button>
+            <button class="dist-btn" onclick="setDistance(400)">4m</button>
+            <button class="dist-btn" onclick="setDistance(500)">5m</button>
+        </div>
         
         <div class="info-row">
             <span>Signal: <span id="rssi">---</span></span>
@@ -342,13 +314,13 @@ HTML_PAGE = """<!DOCTYPE html>
         function updateDistButtons(value) {
             document.querySelectorAll('.dist-btn').forEach(btn => {
                 btn.classList.remove('active');
-                if (parseInt(btn.textContent) * 100 === value || 
-                    (btn.textContent === '1m' && value === 100) ||
-                    (btn.textContent === '1.5m' && value === 150) ||
-                    (btn.textContent === '2m' && value === 200) ||
-                    (btn.textContent === '3m' && value === 300) ||
-                    (btn.textContent === '4m' && value === 400) ||
-                    (btn.textContent === '5m' && value === 500)) {
+                const btnText = btn.textContent;
+                if ((btnText === '1m' && value === 100) ||
+                    (btnText === '1.5m' && value === 150) ||
+                    (btnText === '2m' && value === 200) ||
+                    (btnText === '3m' && value === 300) ||
+                    (btnText === '4m' && value === 400) ||
+                    (btnText === '5m' && value === 500)) {
                     btn.classList.add('active');
                 }
             });
@@ -369,19 +341,19 @@ HTML_PAGE = """<!DOCTYPE html>
         
         function toggleArm() {
             if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({
-                    type: isArmed ? 'disarm' : 'arm',
-                    deviceId: 'esp12_security'
-                }));
-            }
-        }
-        
-        function resetAlarms() {
-            if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({
-                    type: 'reset_alarm',
-                    deviceId: 'esp12_security'
-                }));
+                if (isArmed) {
+                    ws.send(JSON.stringify({
+                        type: 'disarm',
+                        deviceId: 'esp12_security'
+                    }));
+                    console.log('DISARM sent');
+                } else {
+                    ws.send(JSON.stringify({
+                        type: 'arm',
+                        deviceId: 'esp12_security'
+                    }));
+                    console.log('ARM sent');
+                }
             }
         }
         
@@ -461,36 +433,37 @@ async def handle_ws(request):
                                 dead.add(client)
                         web_clients.difference_update(dead)
                     
-                    # Команды от веб-клиента
+                    # ARM / DISARM
                     elif msg_type in ["arm", "disarm"]:
                         target = data.get("deviceId", "esp12_security")
                         print(f"🔒 {msg_type.upper()} {target}")
+                        
                         if target in esp_clients:
-                            await esp_clients[target].send_str(json.dumps({
+                            cmd = json.dumps({
                                 "type": "command",
                                 "command": msg_type
-                            }))
+                            })
+                            await esp_clients[target].send_str(cmd)
+                            print(f"✅ Command sent: {msg_type}")
+                        else:
+                            print(f"❌ Device {target} not connected!")
                     
+                    # Set threshold
                     elif msg_type == "set_threshold":
                         target = data.get("deviceId", "esp12_security")
                         value = int(data.get("value", 200))
-                        print(f"📏 Threshold {value}cm")
+                        print(f"📏 Threshold {value}cm for {target}")
+                        
                         if target in esp_clients:
-                            await esp_clients[target].send_str(json.dumps({
+                            cmd = json.dumps({
                                 "type": "command",
                                 "command": "set_threshold",
                                 "value": value
-                            }))
+                            })
+                            await esp_clients[target].send_str(cmd)
+                            print(f"✅ Threshold sent: {value}")
                     
-                    elif msg_type == "reset_alarm":
-                        target = data.get("deviceId", "esp12_security")
-                        print(f"🔄 Reset {target}")
-                        if target in esp_clients:
-                            await esp_clients[target].send_str(json.dumps({
-                                "type": "command",
-                                "command": "reset_alarm"
-                            }))
-                    
+                    # Web client
                     elif msg_type == "web_client":
                         client_type = "web"
                         web_clients.add(ws)
