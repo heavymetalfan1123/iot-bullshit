@@ -22,7 +22,7 @@ HTML_PAGE = """<!DOCTYPE html>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Touch Counter</title>
+    <title>Счетчик отжиманий</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -182,7 +182,7 @@ HTML_PAGE = """<!DOCTYPE html>
             <span style="color: #888;" id="connStatus">Connecting...</span>
         </div>
         
-        <div class="label">Touch Counter</div>
+        <div class="label">Счетчик Упражнений</div>
         <div class="counter" id="counter">0</div>
         
         <div class="distance" id="distDisplay">--- mm</div>
