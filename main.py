@@ -1,374 +1,544 @@
-import os, json
+# server.py
+import os
+import json
+from pathlib import Path
 from aiohttp import web
 
-ALLOWED = ["esp12_security"]
-esp_ws = None
-web_clients = set()
-last_alarm = False
+def load_config():
+    config_file = Path("config.json")
+    if config_file.exists():
+        with open(config_file, 'r') as f:
+            return json.load(f)
+    return {"allowed_devices": ["esp12_sensor_1"]}
 
-# HTML для сайта
-HTML = """<!DOCTYPE html>
+config = load_config()
+ALLOWED_DEVICES = config.get("allowed_devices", ["esp12_sensor_1"])
+
+esp_clients = {}
+web_clients = set()
+
+HTML_PAGE = """<!DOCTYPE html>
 <html>
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
-    <meta name="apple-mobile-web-app-capable" content="yes">
-    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-    <meta name="theme-color" content="#0a0a0f">
-    <link rel="manifest" href="/manifest.json">
-    <title>Security</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Exercise Counter</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: Arial; background: #0a0a0f; color: #fff; text-align: center; padding: 20px; min-height: 100vh; }
-        .circle { width: 150px; height: 150px; border-radius: 50%; margin: 20px auto; line-height: 150px; font-size: 20px; font-weight: bold; border: 4px solid; }
-        .disarmed { background: rgba(0,255,0,0.1); border-color: #0f0; color: #0f0; }
-        .armed { background: rgba(255,165,0,0.1); border-color: #fa0; color: #fa0; }
-        .alarm { background: rgba(255,0,0,0.2); border-color: #f00; color: #f00; animation: pulse 0.5s infinite; }
-        @keyframes pulse { 0%,100% { transform: scale(1); } 50% { transform: scale(1.05); } }
-        .btn { padding: 20px; font-size: 20px; font-weight: bold; border: 3px solid; border-radius: 15px; cursor: pointer; margin: 10px; width: 90%; max-width: 400px; -webkit-tap-highlight-color: transparent; }
-        .btn.arm { background: rgba(255,165,0,0.2); border-color: #fa0; color: #fa0; }
-        .btn.disarm { background: rgba(0,255,0,0.2); border-color: #0f0; color: #0f0; }
-        .dist-btn { padding: 15px 10px; margin: 5px; font-size: 14px; background: rgba(255,255,255,0.05); border: 2px solid rgba(255,255,255,0.1); color: #aaa; border-radius: 10px; cursor: pointer; -webkit-tap-highlight-color: transparent; }
-        .dist-btn.active { background: rgba(255,102,0,0.2); border-color: #f60; color: #f60; }
-        #installBtn { display: none; padding: 15px; background: #4CAF50; color: white; border: none; border-radius: 10px; font-size: 16px; cursor: pointer; margin: 20px 0; width: 90%; max-width: 400px; }
-        #log { margin-top: 20px; font-size: 10px; color: #444; max-height: 80px; overflow-y: auto; text-align: left; padding: 10px; background: rgba(255,255,255,0.02); border-radius: 10px; }
+        body {
+            font-family: 'Arial', sans-serif;
+            background: #0a0a0f;
+            color: #fff;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .container { text-align: center; padding: 40px; max-width: 600px; width: 100%; }
+        
+        .title {
+            font-size: 16px;
+            color: #666;
+            letter-spacing: 4px;
+            text-transform: uppercase;
+            margin-bottom: 10px;
+        }
+        
+        .counter {
+            font-size: 160px;
+            font-weight: bold;
+            color: #ff6600;
+            text-shadow: 0 0 50px rgba(255,102,0,0.5), 0 0 100px rgba(255,102,0,0.3);
+            line-height: 1;
+            margin: 20px 0;
+            transition: color 0.3s, text-shadow 0.3s;
+        }
+        
+        .counter.reset-flash {
+            color: #00ff00 !important;
+            text-shadow: 0 0 80px rgba(0,255,0,0.8) !important;
+        }
+        
+        .exercise-name {
+            font-size: 24px;
+            color: #888;
+            margin-bottom: 10px;
+            letter-spacing: 3px;
+        }
+        
+        .distance {
+            font-size: 28px;
+            margin: 10px 0;
+            color: #888;
+        }
+        
+        .distance span {
+            color: #00ffff;
+            font-weight: bold;
+        }
+        
+        .exercise-buttons {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+            margin: 30px 0;
+        }
+        
+        .exercise-btn {
+            padding: 20px;
+            font-size: 18px;
+            font-weight: bold;
+            background: rgba(255,255,255,0.05);
+            border: 2px solid rgba(255,255,255,0.1);
+            color: #aaa;
+            border-radius: 15px;
+            cursor: pointer;
+            transition: all 0.3s;
+            text-align: left;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .exercise-btn:hover {
+            background: rgba(255,255,255,0.1);
+            border-color: rgba(255,255,255,0.3);
+        }
+        
+        .exercise-btn.active {
+            background: rgba(255,102,0,0.2);
+            border-color: #ff6600;
+            color: #ff6600;
+            box-shadow: 0 0 20px rgba(255,102,0,0.2);
+        }
+        
+        .exercise-btn .btn-name {
+            font-size: 20px;
+        }
+        
+        .exercise-btn .btn-distance {
+            font-size: 14px;
+            color: #666;
+            background: rgba(255,255,255,0.1);
+            padding: 5px 15px;
+            border-radius: 20px;
+        }
+        
+        .exercise-btn.active .btn-distance {
+            background: rgba(255,102,0,0.3);
+            color: #ffaa00;
+        }
+        
+        .controls {
+            background: rgba(255,255,255,0.03);
+            border-radius: 20px;
+            padding: 25px;
+            margin: 20px 0;
+        }
+        
+        .slider-container { margin: 15px 0; }
+        
+        .slider-label {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 10px;
+            font-size: 13px;
+            color: #666;
+        }
+        
+        input[type="range"] {
+            width: 100%;
+            height: 6px;
+            border-radius: 3px;
+            background: linear-gradient(90deg, #00ff00, #ffaa00, #ff0000);
+            outline: none;
+            -webkit-appearance: none;
+        }
+        
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 28px;
+            height: 28px;
+            border-radius: 50%;
+            background: #fff;
+            cursor: pointer;
+            box-shadow: 0 0 15px rgba(255,255,255,0.3);
+        }
+        
+        .threshold-display {
+            font-size: 32px;
+            font-weight: bold;
+            color: #ffaa00;
+            margin: 10px 0;
+        }
+        
+        .reset-btn {
+            width: 100%;
+            padding: 18px;
+            font-size: 18px;
+            font-weight: bold;
+            background: rgba(255,0,0,0.2);
+            border: 2px solid rgba(255,0,0,0.3);
+            color: #ff4444;
+            border-radius: 15px;
+            cursor: pointer;
+            letter-spacing: 3px;
+            transition: all 0.3s;
+            margin-top: 15px;
+        }
+        
+        .reset-btn:hover {
+            background: rgba(255,0,0,0.3);
+            border-color: #ff0000;
+            color: #ff0000;
+        }
+        
+        .reset-btn:active {
+            transform: scale(0.97);
+        }
+        
+        .status-bar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            font-size: 13px;
+            color: #666;
+        }
+        
+        .dot {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            margin-right: 8px;
+        }
+        
+        .dot.online { background: #00ff00; box-shadow: 0 0 8px #00ff00; }
+        .dot.offline { background: #ff0000; box-shadow: 0 0 8px #ff0000; }
+        
+        .info-row {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 20px;
+            font-size: 12px;
+            color: #555;
+        }
+        
+        .info-row span {
+            color: #888;
+        }
     </style>
 </head>
 <body>
-    <button id="installBtn" onclick="installApp()">📲 INSTALL APP</button>
-    <div><span id="dot" style="color:red">●</span> <span id="conn">Connecting...</span></div>
-    <div class="circle disarmed" id="circle">DISARMED</div>
-    <div id="alarms" style="display:none;font-size:40px;color:#f44">🚨 ALARMS: 0</div>
-    <div style="font-size:22px;color:#888">Distance: <span style="color:#0ff" id="dist">--- cm</span></div>
-    <button class="btn arm" id="armBtn" onclick="toggle()">🔒 ARM SYSTEM</button>
-    <div style="font-size:13px;color:#666;margin:20px 0">DETECTION RANGE</div>
-    <div style="font-size:28px;color:#fa0" id="thr">200 cm</div>
-    <div>
-        <button class="dist-btn active" onclick="setDist(100)">1m</button>
-        <button class="dist-btn" onclick="setDist(150)">1.5m</button>
-        <button class="dist-btn" onclick="setDist(200)">2m</button>
+    <div class="container">
+        <div class="status-bar">
+            <span><span class="dot" id="dot"></span><span id="connStatus">Connecting...</span></span>
+            <span id="espStatus">---</span>
+        </div>
+        
+        <div class="exercise-name" id="exerciseName">STANDARD MODE</div>
+        <div class="counter" id="counter">0</div>
+        
+        <div class="distance">
+            Distance: <span id="distDisplay">--- mm</span>
+        </div>
+        
+        <div class="exercise-buttons">
+            <button class="exercise-btn active" id="btnPushup" onclick="setExercise('pushup')">
+                <span class="btn-name">💪 Отжимания</span>
+                <span class="btn-distance">15 см</span>
+            </button>
+            <button class="exercise-btn" id="btnSquat" onclick="setExercise('squat')">
+                <span class="btn-name">🦵 Приседания</span>
+                <span class="btn-distance">40 см</span>
+            </button>
+            <button class="exercise-btn" id="btnCustom" onclick="setExercise('custom')">
+                <span class="btn-name">🎯 Стандартное</span>
+                <span class="btn-distance">100 см</span>
+            </button>
+        </div>
+        
+        <div class="controls">
+            <div style="font-size: 14px; color: #666; letter-spacing: 2px; margin-bottom: 10px;">CUSTOM DISTANCE</div>
+            <div class="threshold-display" id="thresholdValue">100 mm</div>
+            <div class="slider-container">
+                <div class="slider-label">
+                    <span>10mm</span>
+                    <span>500mm</span>
+                </div>
+                <input type="range" id="thresholdSlider" min="10" max="500" value="100" step="5">
+            </div>
+        </div>
+        
+        <button class="reset-btn" onclick="resetCounter()">🔄 RESET COUNTER</button>
+        
+        <div class="info-row">
+            <span>Signal: <span id="rssi">---</span></span>
+            <span>Uptime: <span id="uptime">0s</span></span>
+        </div>
     </div>
-    <div>
-        <button class="dist-btn" onclick="setDist(300)">3m</button>
-        <button class="dist-btn" onclick="setDist(400)">4m</button>
-        <button class="dist-btn" onclick="setDist(500)">5m</button>
-    </div>
-    <div style="margin-top:20px;font-size:12px;color:#555">
-        <span>Signal: <span id="rssi">---</span></span> |
-        <span>Uptime: <span id="uptime">0s</span></span>
-    </div>
-    <div id="log"></div>
     
     <script>
-        // Service Worker для уведомлений
-        if ('serviceWorker' in navigator) {
-            navigator.serviceWorker.register('/sw.js').then(function(reg) {
-                log('✅ Service Worker registered');
-            }).catch(function(err) {
-                log('❌ SW error: ' + err);
-            });
-        }
+        const wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
+        let ws;
+        let ignoreNextUpdate = false;
+        let currentExercise = 'pushup';
         
-        // PWA Install
-        let deferredPrompt;
-        window.addEventListener('beforeinstallprompt', function(e) {
-            e.preventDefault();
-            deferredPrompt = e;
-            document.getElementById('installBtn').style.display = 'block';
-            log('📲 App can be installed!');
-        });
-        
-        function installApp() {
-            if (deferredPrompt) {
-                deferredPrompt.prompt();
-                deferredPrompt.userChoice.then(function(result) {
-                    log('Install: ' + result.outcome);
-                    document.getElementById('installBtn').style.display = 'none';
-                });
-            }
-        }
-        
-        let ws, armed = false, thr = 200;
-        
-        function log(msg) {
-            let el = document.getElementById('log');
-            el.innerHTML += new Date().toLocaleTimeString() + ': ' + msg + '<br>';
-            el.scrollTop = el.scrollHeight;
-            console.log(msg);
-        }
-        
-        async function showNotification(title, body) {
-            log('🔔 Showing notification: ' + title);
-            
-            if (Notification.permission === 'granted') {
-                // Через Service Worker (работает даже в фоне)
-                if (navigator.serviceWorker && navigator.serviceWorker.ready) {
-                    let reg = await navigator.serviceWorker.ready;
-                    reg.showNotification(title, {
-                        body: body,
-                        icon: '/icon.png',
-                        badge: '/icon.png',
-                        tag: 'alarm',
-                        requireInteraction: true,
-                        vibrate: [200, 100, 200, 100, 200],
-                        actions: [
-                            { action: 'open', title: 'Open App' },
-                            { action: 'close', title: 'Close' }
-                        ]
-                    });
-                    log('✅ Notification via SW');
-                } else {
-                    // Обычное уведомление
-                    new Notification(title, {
-                        body: body,
-                        icon: '/icon.png',
-                        tag: 'alarm',
-                        requireInteraction: true,
-                        vibrate: [200, 100, 200, 100, 200]
-                    });
-                    log('✅ Regular notification');
-                }
-            } else if (Notification.permission === 'default') {
-                log('📝 Requesting permission...');
-                let perm = await Notification.requestPermission();
-                log('Permission: ' + perm);
-                if (perm === 'granted') {
-                    showNotification(title, body);
-                }
-            } else {
-                log('❌ Notifications blocked!');
-            }
-        }
-        
-        function playSound() {
-            try {
-                let ctx = new (window.AudioContext || window.webkitAudioContext)();
-                [0, 300, 600].forEach(function(delay) {
-                    setTimeout(function() {
-                        let o = ctx.createOscillator();
-                        let g = ctx.createGain();
-                        o.connect(g); g.connect(ctx.destination);
-                        o.frequency.value = 800;
-                        o.type = 'square';
-                        g.gain.value = 0.3;
-                        o.start();
-                        setTimeout(function() { o.stop(); }, 200);
-                    }, delay);
-                });
-            } catch(e) {}
-        }
+        // Настройки упражнений
+        const exercises = {
+            pushup: { name: 'ОТЖИМАНИЯ', distance: 150, emoji: '💪' },
+            squat: { name: 'ПРИСЕДАНИЯ', distance: 400, emoji: '🦵' },
+            custom: { name: 'СТАНДАРТНОЕ', distance: 100, emoji: '🎯' }
+        };
         
         function connect() {
-            ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
-            ws.onopen = function() {
-                document.getElementById('dot').style.color = '#0f0';
-                document.getElementById('conn').textContent = 'Connected';
+            ws = new WebSocket(wsUrl);
+            
+            ws.onopen = () => {
+                document.getElementById('dot').className = 'dot online';
+                document.getElementById('connStatus').textContent = 'Connected';
                 ws.send(JSON.stringify({type: 'web_client'}));
-                log('✅ Connected');
+            };
+            
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                console.log('Received:', data);
                 
-                // Запрашиваем разрешение на уведомления
-                if (Notification.permission === 'default') {
-                    Notification.requestPermission();
+                if (data.type === 'update') {
+                    updateDisplay(data.data);
+                } else if (data.type === 'reset_confirm') {
+                    const counter = document.getElementById('counter');
+                    counter.textContent = '0';
+                    counter.classList.add('reset-flash');
+                    setTimeout(() => counter.classList.remove('reset-flash'), 500);
                 }
             };
-            ws.onmessage = function(e) {
-                let d = JSON.parse(e.data);
-                if (d.type === 'update') update(d.data);
-                else if (d.type === 'alarm') {
-                    log('🚨 ALARM RECEIVED!');
-                    showNotification('🚨 SECURITY ALARM!', 'Intruder detected! Distance: ' + (d.distance || 0) + 'cm');
-                    playSound();
-                }
-            };
-            ws.onclose = function() {
-                document.getElementById('dot').style.color = 'red';
-                document.getElementById('conn').textContent = 'Reconnecting...';
+            
+            ws.onclose = () => {
+                document.getElementById('dot').className = 'dot offline';
+                document.getElementById('connStatus').textContent = 'Reconnecting...';
                 setTimeout(connect, 3000);
             };
         }
         
-        function update(d) {
-            document.getElementById('dist').textContent = (d.distance || 0).toFixed(1) + ' cm';
-            let c = document.getElementById('circle');
-            if (d.alarm) {
-                c.className = 'circle alarm';
-                c.textContent = '🚨 ALARM!';
-                document.getElementById('alarms').style.display = 'block';
-                document.getElementById('alarms').textContent = '🚨 ALARMS: ' + (d.alarm_count || 0);
-            } else if (d.security_mode) {
-                c.className = 'circle armed';
-                c.textContent = 'ARMED';
-                document.getElementById('alarms').style.display = 'none';
-            } else {
-                c.className = 'circle disarmed';
-                c.textContent = 'DISARMED';
-                document.getElementById('alarms').style.display = 'none';
-            }
-            let btn = document.getElementById('armBtn');
-            if (d.security_mode) { btn.textContent = '🔓 DISARM'; btn.className = 'btn disarm'; armed = true; }
-            else { btn.textContent = '🔒 ARM SYSTEM'; btn.className = 'btn arm'; armed = false; }
-            if (d.threshold !== thr) { thr = d.threshold; document.getElementById('thr').textContent = thr + ' cm'; updateBtns(thr); }
+        function updateDisplay(d) {
+            document.getElementById('counter').textContent = d.touch_count || 0;
+            
+            const dist = d.distance || 0;
+            const threshold = d.threshold || 100;
+            
+            document.getElementById('distDisplay').textContent = dist.toFixed(1) + ' mm';
+            
+            // Проверяем близость
+            const isNear = dist > 0 && dist <= threshold;
+            document.getElementById('espStatus').textContent = isNear ? '🔴 DETECTED' : '🟢 WAITING';
+            document.getElementById('espStatus').style.color = isNear ? '#ff0000' : '#00ff00';
+            
             document.getElementById('rssi').textContent = (d.rssi || 0) + ' dBm';
-            let u = d.uptime || 0;
-            document.getElementById('uptime').textContent = Math.floor(u / 3600) + 'h ' + Math.floor((u % 3600) / 60) + 'm ' + u % 60 + 's';
+            
+            const uptime = d.uptime || 0;
+            const h = Math.floor(uptime / 3600);
+            const m = Math.floor((uptime % 3600) / 60);
+            const s = uptime % 60;
+            document.getElementById('uptime').textContent = h + 'h ' + m + 'm ' + s + 's';
+            
+            // Обновляем слайдер
+            if (!ignoreNextUpdate && threshold !== parseInt(document.getElementById('thresholdSlider').value)) {
+                document.getElementById('thresholdSlider').value = threshold;
+                document.getElementById('thresholdValue').textContent = threshold + ' mm';
+                
+                // Определяем какое упражнение выбрано
+                if (threshold === 150) {
+                    currentExercise = 'pushup';
+                } else if (threshold === 400) {
+                    currentExercise = 'squat';
+                } else if (threshold === 100) {
+                    currentExercise = 'custom';
+                }
+                updateActiveButton();
+            }
         }
         
-        function updateBtns(v) {
-            document.querySelectorAll('.dist-btn').forEach(function(b) {
-                b.classList.remove('active');
-                let t = b.textContent;
-                if ((t === '1m' && v === 100) || (t === '1.5m' && v === 150) || (t === '2m' && v === 200) || (t === '3m' && v === 300) || (t === '4m' && v === 400) || (t === '5m' && v === 500)) b.classList.add('active');
+        function setExercise(type) {
+            const exercise = exercises[type];
+            currentExercise = type;
+            
+            document.getElementById('exerciseName').textContent = exercise.name;
+            document.getElementById('thresholdSlider').value = exercise.distance;
+            document.getElementById('thresholdValue').textContent = exercise.distance + ' mm';
+            
+            updateActiveButton();
+            
+            // Отправляем новый порог
+            ignoreNextUpdate = true;
+            sendThreshold(exercise.distance);
+            setTimeout(() => { ignoreNextUpdate = false; }, 2000);
+        }
+        
+        function updateActiveButton() {
+            document.querySelectorAll('.exercise-btn').forEach(btn => {
+                btn.classList.remove('active');
             });
+            
+            const activeBtn = document.getElementById('btn' + currentExercise.charAt(0).toUpperCase() + currentExercise.slice(1));
+            if (activeBtn) {
+                activeBtn.classList.add('active');
+            }
         }
         
-        function setDist(v) { thr = v; document.getElementById('thr').textContent = v + ' cm'; updateBtns(v); if (ws) ws.send(JSON.stringify({type: 'set_threshold', value: v})); }
-        function toggle() { if (ws) ws.send(JSON.stringify({type: armed ? 'disarm' : 'arm'})); }
+        // Слайдер
+        document.getElementById('thresholdSlider').addEventListener('input', function(e) {
+            const value = parseInt(e.target.value);
+            document.getElementById('thresholdValue').textContent = value + ' mm';
+        });
+        
+        document.getElementById('thresholdSlider').addEventListener('change', function(e) {
+            const value = parseInt(e.target.value);
+            currentExercise = 'custom';
+            document.getElementById('exerciseName').textContent = exercises.custom.name;
+            updateActiveButton();
+            ignoreNextUpdate = true;
+            sendThreshold(value);
+            setTimeout(() => { ignoreNextUpdate = false; }, 2000);
+        });
+        
+        function sendThreshold(value) {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                    type: 'set_threshold',
+                    deviceId: 'esp12_sensor_1',
+                    value: value
+                }));
+                console.log('Threshold sent: ' + value + 'mm');
+            }
+        }
+        
+        function resetCounter() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                    type: 'reset',
+                    deviceId: 'esp12_sensor_1'
+                }));
+                console.log('RESET sent');
+            }
+        }
         
         connect();
     </script>
 </body>
 </html>"""
 
-# Service Worker
-SW_JS = """
-self.addEventListener('install', function(e) {
-    console.log('SW installed');
-    self.skipWaiting();
-});
-
-self.addEventListener('activate', function(e) {
-    console.log('SW activated');
-    e.waitUntil(self.clients.claim());
-});
-
-self.addEventListener('push', function(e) {
-    let data = e.data.json();
-    self.registration.showNotification(data.title, data.options);
-});
-
-self.addEventListener('notificationclick', function(e) {
-    e.notification.close();
-    e.waitUntil(
-        clients.matchAll({type: 'window'}).then(function(clientList) {
-            for (let client of clientList) {
-                if (client.url && 'focus' in client) {
-                    return client.focus();
-                }
-            }
-            if (clients.openWindow) {
-                return clients.openWindow('/');
-            }
-        })
-    );
-});
-"""
-
-# Manifest для PWA
-MANIFEST = {
-    "name": "Security System",
-    "short_name": "Security",
-    "start_url": "/",
-    "display": "standalone",
-    "background_color": "#0a0a0f",
-    "theme_color": "#0a0a0f",
-    "icons": [
-        {"src": "/icon.png", "sizes": "192x192", "type": "image/png"}
-    ]
-}
-
 async def handle_http(request):
-    return web.Response(text=HTML, content_type='text/html')
+    return web.Response(text=HTML_PAGE, content_type='text/html')
 
-async def handle_sw(request):
-    return web.Response(text=SW_JS, content_type='application/javascript')
-
-async def handle_manifest(request):
-    return web.json_response(MANIFEST)
-
-async def handle_icon(request):
-    # Простая иконка 1x1 пиксель PNG
-    icon = b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc\xf8\x0f\x00\x00\x01\x01\x00\x05\x18\xd8N\x00\x00\x00\x00IEND\xaeB`\x82'
-    return web.Response(body=icon, content_type='image/png')
-
-async def ws_handler(request):
-    global esp_ws, last_alarm
-    ws = web.WebSocketResponse(protocols=['arduino', ''])
+async def handle_ws(request):
+    ws = web.WebSocketResponse()
     await ws.prepare(request)
     
     client_type = None
-    print("🔌 New connection")
+    device_id = None
+    
+    print("🔌 New WebSocket connection")
     
     try:
         async for msg in ws:
             if msg.type == web.WSMsgType.TEXT:
-                data = json.loads(msg.data)
-                t = data.get("type", "")
-                
-                if t == "register":
-                    did = data.get("deviceId", "")
-                    if did in ALLOWED:
-                        esp_ws = ws
-                        client_type = "esp"
-                        print(f"✅ ESP: {did}")
-                        await ws.send_json({"type": "registered"})
-                
-                elif t == "sensor_data":
-                    sensor = data.get("data", {})
-                    current_alarm = sensor.get("alarm", False)
-                    distance = sensor.get("distance", 0)
+                try:
+                    data = json.loads(msg.data)
+                    print(f"📨 Received: {data.get('type', 'unknown')}")
                     
-                    if current_alarm and not last_alarm:
-                        print(f"🚨🚨🚨 ALARM! Distance: {distance}cm 🚨🚨🚨")
-                        alarm_msg = json.dumps({
-                            "type": "alarm",
-                            "distance": distance
+                    # ESP регистрация
+                    if data.get("type") == "register":
+                        device_id = data.get("deviceId", "")
+                        
+                        if device_id not in ALLOWED_DEVICES:
+                            await ws.send_json({"type": "error"})
+                            continue
+                        
+                        client_type = "esp"
+                        esp_clients[device_id] = ws
+                        print(f"✅ ESP connected: {device_id}")
+                        await ws.send_json({"type": "registered"})
+                    
+                    # Данные с датчика
+                    elif data.get("type") == "sensor_data":
+                        sensor = data.get("data", {})
+                        
+                        update_msg = json.dumps({
+                            "type": "update",
+                            "data": sensor
                         })
+                        
                         dead = set()
-                        for c in web_clients.copy():
+                        for client in web_clients.copy():
                             try:
-                                await c.send_str(alarm_msg)
+                                await client.send_str(update_msg)
                             except:
-                                dead.add(c)
+                                dead.add(client)
                         web_clients.difference_update(dead)
                     
-                    last_alarm = current_alarm
+                    # Сброс от веб-клиента
+                    elif data.get("type") == "reset":
+                        target = data.get("deviceId", "esp12_sensor_1")
+                        print(f"🔄 RESET command for {target}")
+                        
+                        if target in esp_clients:
+                            try:
+                                reset_cmd = json.dumps({
+                                    "type": "command",
+                                    "command": "reset"
+                                })
+                                await esp_clients[target].send_str(reset_cmd)
+                                print(f"✅ Reset sent to {target}")
+                            except Exception as e:
+                                print(f"❌ Error: {e}")
                     
-                    upd = json.dumps({"type": "update", "data": sensor})
-                    dead = set()
-                    for c in web_clients.copy():
-                        try:
-                            await c.send_str(upd)
-                        except:
-                            dead.add(c)
-                    web_clients.difference_update(dead)
+                    # Изменение порога
+                    elif data.get("type") == "set_threshold":
+                        target = data.get("deviceId", "esp12_sensor_1")
+                        value = int(data.get("value", 100))
+                        print(f"📏 Threshold {value}mm for {target}")
+                        
+                        if target in esp_clients:
+                            try:
+                                threshold_cmd = json.dumps({
+                                    "type": "command",
+                                    "command": "set_threshold",
+                                    "value": value
+                                })
+                                await esp_clients[target].send_str(threshold_cmd)
+                                print(f"✅ Threshold sent: {value}mm")
+                            except Exception as e:
+                                print(f"❌ Error: {e}")
+                    
+                    # Подтверждение сброса от ESP
+                    elif data.get("type") == "reset_confirm":
+                        print(f"✅ ESP confirmed reset!")
+                        confirm = json.dumps({"type": "reset_confirm"})
+                        for client in web_clients.copy():
+                            try:
+                                await client.send_str(confirm)
+                            except:
+                                pass
+                    
+                    # Веб-клиент
+                    elif data.get("type") == "web_client":
+                        client_type = "web"
+                        web_clients.add(ws)
+                        print(f"🌐 Web client (total: {len(web_clients)})")
                 
-                elif t == "arm":
-                    print("🔒 ARM")
-                    if esp_ws:
-                        await esp_ws.send_str('{"command":"arm"}')
-                
-                elif t == "disarm":
-                    print("🔓 DISARM")
-                    if esp_ws:
-                        await esp_ws.send_str('{"command":"disarm"}')
-                
-                elif t == "set_threshold":
-                    v = int(data.get("value", 200))
-                    print(f"📏 Threshold: {v}cm")
-                    if esp_ws:
-                        await esp_ws.send_str('{"command":"set_threshold","value":'+str(v)+'}')
-                
-                elif t == "web_client":
-                    client_type = "web"
-                    web_clients.add(ws)
-                    print(f"🌐 Web client (total: {len(web_clients)})")
+                except Exception as e:
+                    print(f"Error: {e}")
     
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Connection error: {e}")
     finally:
-        if client_type == "esp":
-            esp_ws = None
-        else:
+        if client_type == "esp" and device_id:
+            if device_id in esp_clients:
+                del esp_clients[device_id]
+            print(f"❌ ESP disconnected: {device_id}")
+        elif client_type == "web":
             web_clients.discard(ws)
     
     return ws
@@ -376,10 +546,7 @@ async def ws_handler(request):
 if __name__ == '__main__':
     app = web.Application()
     app.router.add_get('/', handle_http)
-    app.router.add_get('/sw.js', handle_sw)
-    app.router.add_get('/manifest.json', handle_manifest)
-    app.router.add_get('/icon.png', handle_icon)
-    app.router.add_get('/ws', ws_handler)
+    app.router.add_get('/ws', handle_ws)
     
     port = int(os.environ.get('PORT', 8000))
     print(f"Server on port {port}")
