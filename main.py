@@ -4,6 +4,7 @@ from aiohttp import web
 ALLOWED = ["esp12_security"]
 esp_ws = None
 web_clients = set()
+last_alarm = False
 
 HTML = """<html><head><meta charset="UTF-8"><title>Security</title>
 <style>body{font-family:Arial;background:#0a0a0f;color:#fff;text-align:center;padding:30px}
@@ -40,7 +41,7 @@ let ws, armed=false, thr=200;
 function connect(){
  ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws');
  ws.onopen=()=>{document.getElementById('dot').style.color='#0f0';document.getElementById('conn').textContent='Connected';ws.send(JSON.stringify({type:'web_client'}));};
- ws.onmessage=e=>{let d=JSON.parse(e.data);if(d.type==='update')update(d.data);};
+ ws.onmessage=e=>{let d=JSON.parse(e.data);if(d.type==='update')update(d.data);else if(d.type==='alarm')alarmNotify(d);};
  ws.onclose=()=>{document.getElementById('dot').style.color='red';document.getElementById('conn').textContent='Reconnecting...';setTimeout(connect,3000);};
 }
 function update(d){
@@ -56,9 +57,27 @@ function update(d){
  document.getElementById('rssi').textContent=(d.rssi||0)+' dBm';
  let u=d.uptime||0;document.getElementById('uptime').textContent=Math.floor(u/3600)+'h '+Math.floor((u%3600)/60)+'m '+u%60+'s';
 }
+function alarmNotify(d){
+ // Браузерное уведомление
+ if(Notification.permission==='granted'){
+  new Notification('🚨 SECURITY ALARM!',{body:'Intruder detected! Distance: '+(d.distance||0)+'cm',icon:'🔒',tag:'alarm',requireInteraction:true,vibrate:[200,100,200]});
+ }
+ // Звук тревоги
+ try{
+  let ctx=new (window.AudioContext||window.webkitAudioContext)();
+  function beep(freq,dur){
+   let o=ctx.createOscillator(),g=ctx.createGain();
+   o.connect(g);g.connect(ctx.destination);
+   o.frequency.value=freq;o.type='square';g.gain.value=0.3;
+   o.start();setTimeout(()=>{o.stop();},dur);
+  }
+  beep(800,200);setTimeout(()=>beep(800,200),300);setTimeout(()=>beep(800,400),600);
+ }catch(e){}
+}
 function updateBtns(v){document.querySelectorAll('.dist-btn').forEach(b=>{b.classList.remove('active');let t=b.textContent;if((t==='1m'&&v===100)||(t==='1.5m'&&v===150)||(t==='2m'&&v===200)||(t==='3m'&&v===300)||(t==='4m'&&v===400)||(t==='5m'&&v===500))b.classList.add('active');});}
 function setDist(v){thr=v;document.getElementById('thr').textContent=v+' cm';updateBtns(v);if(ws)ws.send(JSON.stringify({type:'set_threshold',value:v}));}
 function toggle(){if(ws)ws.send(JSON.stringify({type:armed?'disarm':'arm'}));}
+if(Notification.permission==='default')Notification.requestPermission();
 connect();
 </script></body></html>"""
 
@@ -66,10 +85,11 @@ async def http_handler(request):
     return web.Response(text=HTML, content_type='text/html')
 
 async def ws_handler(request):
-    global esp_ws
+    global esp_ws, last_alarm
     ws = web.WebSocketResponse(protocols=['arduino', ''])
     await ws.prepare(request)
     
+    client_type = None
     print("🔌 New connection")
     
     try:
@@ -82,54 +102,85 @@ async def ws_handler(request):
                     did = data.get("deviceId", "")
                     if did in ALLOWED:
                         esp_ws = ws
+                        client_type = "esp"
                         print(f"✅ ESP: {did}")
                         await ws.send_json({"type": "registered"})
                 
                 elif t == "sensor_data":
                     sensor = data.get("data", {})
+                    current_alarm = sensor.get("alarm", False)
+                    distance = sensor.get("distance", 0)
+                    
+                    # Если новая тревога - отправляем уведомление всем
+                    if current_alarm and not last_alarm:
+                        print(f"🚨🚨🚨 ALARM! Distance: {distance}cm 🚨🚨🚨")
+                        
+                        # Отправляем специальное сообщение о тревоге
+                        alarm_msg = json.dumps({
+                            "type": "alarm",
+                            "distance": distance,
+                            "message": "INTRUDER DETECTED!",
+                            "timestamp": str(int(os.popen('date +%s').read().strip())) if os.name != 'nt' else "now"
+                        })
+                        
+                        dead = set()
+                        for c in web_clients.copy():
+                            try:
+                                await c.send_str(alarm_msg)
+                            except:
+                                dead.add(c)
+                        web_clients.difference_update(dead)
+                    
+                    last_alarm = current_alarm
+                    
+                    # Обычное обновление данных
                     upd = json.dumps({"type": "update", "data": sensor})
                     dead = set()
                     for c in web_clients.copy():
-                        try: await c.send_str(upd)
-                        except: dead.add(c)
+                        try:
+                            await c.send_str(upd)
+                        except:
+                            dead.add(c)
                     web_clients.difference_update(dead)
                 
                 elif t == "arm":
-                    print("🔒 ARM command")
+                    print("🔒 ARM")
                     if esp_ws:
-                        await esp_ws.send_str(json.dumps({"command": "arm"}))
+                        await esp_ws.send_str('{"command":"arm"}')
                         print("✅ ARM sent")
                     else:
-                        print("❌ No ESP connected!")
+                        print("❌ No ESP")
                 
                 elif t == "disarm":
-                    print("🔓 DISARM command")
+                    print("🔓 DISARM")
                     if esp_ws:
-                        await esp_ws.send_str(json.dumps({"command": "disarm"}))
+                        await esp_ws.send_str('{"command":"disarm"}')
                         print("✅ DISARM sent")
                     else:
-                        print("❌ No ESP connected!")
+                        print("❌ No ESP")
                 
                 elif t == "set_threshold":
                     v = int(data.get("value", 200))
                     print(f"📏 Threshold: {v}cm")
                     if esp_ws:
-                        await esp_ws.send_str(json.dumps({"command": "set_threshold", "value": v}))
+                        await esp_ws.send_str('{"command":"set_threshold","value":' + str(v) + '}')
                         print(f"✅ Threshold sent: {v}")
                     else:
-                        print("❌ No ESP connected!")
+                        print("❌ No ESP")
                 
                 elif t == "web_client":
+                    client_type = "web"
                     web_clients.add(ws)
                     print(f"🌐 Web client")
     
     except Exception as e:
         print(f"Error: {e}")
     finally:
-        if esp_ws == ws:
+        if client_type == "esp":
             esp_ws = None
             print("❌ ESP disconnected")
-        web_clients.discard(ws)
+        else:
+            web_clients.discard(ws)
     
     return ws
 
