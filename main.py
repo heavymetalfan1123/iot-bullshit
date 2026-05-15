@@ -188,7 +188,7 @@ HTML_PAGE = """<!DOCTYPE html>
         <div class="distance" id="distDisplay">--- mm</div>
         
         <div class="controls">
-            <div style="font-size: 18px; color: #888; margin-bottom: 15px;">DISTANCE THRESHOLD</div>
+            <div style="font-size: 18px; color: #888; margin-bottom: 15px;">Настроить Расстояние</div>
             
             <div class="threshold-display" id="thresholdValue">100 mm</div>
             
@@ -208,7 +208,7 @@ HTML_PAGE = """<!DOCTYPE html>
             </div>
         </div>
         
-        <button class="reset-btn" onclick="resetCounter()">RESET COUNTER</button>
+        <button class="reset-btn" onclick="resetCounter()">обнулить</button>
         
         <div class="info-row">
             <span>Signal: <span id="rssi">---</span></span>
