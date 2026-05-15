@@ -210,9 +210,9 @@ HTML_PAGE = """<!DOCTYPE html>
         <div class="dist-value" id="thresholdDisplay">200 cm</div>
         
         <div class="distance-buttons">
-            <button class="dist-btn active" onclick="setDistance(100)">1m</button>
+            <button class="dist-btn" onclick="setDistance(100)">1m</button>
             <button class="dist-btn" onclick="setDistance(150)">1.5m</button>
-            <button class="dist-btn" onclick="setDistance(200)">2m</button>
+            <button class="dist-btn active" onclick="setDistance(200)">2m</button>
             <button class="dist-btn" onclick="setDistance(300)">3m</button>
             <button class="dist-btn" onclick="setDistance(400)">4m</button>
             <button class="dist-btn" onclick="setDistance(500)">5m</button>
@@ -229,6 +229,8 @@ HTML_PAGE = """<!DOCTYPE html>
         let ws;
         let isArmed = false;
         let hasAlarm = false;
+        let currentThreshold = 200;
+        let isUpdatingFromServer = false;
         
         function connect() {
             ws = new WebSocket(wsUrl);
@@ -241,6 +243,7 @@ HTML_PAGE = """<!DOCTYPE html>
             
             ws.onmessage = (event) => {
                 const data = JSON.parse(event.data);
+                console.log('Received:', data.type);
                 
                 if (data.type === 'update') {
                     updateDisplay(data.data);
@@ -289,6 +292,7 @@ HTML_PAGE = """<!DOCTYPE html>
                 hasAlarm = false;
             }
             
+            // Обновляем кнопку
             if (securityMode) {
                 armBtn.textContent = '🔓 DISARM';
                 armBtn.className = 'arm-btn disarm';
@@ -299,8 +303,12 @@ HTML_PAGE = """<!DOCTYPE html>
                 isArmed = false;
             }
             
-            document.getElementById('thresholdDisplay').textContent = threshold + ' cm';
-            updateDistButtons(threshold);
+            // Обновляем threshold только если он пришел с ESP
+            if (threshold !== currentThreshold) {
+                currentThreshold = threshold;
+                document.getElementById('thresholdDisplay').textContent = threshold + ' cm';
+                updateDistButtons(threshold);
+            }
             
             document.getElementById('rssi').textContent = (d.rssi || 0) + ' dBm';
             
@@ -327,6 +335,7 @@ HTML_PAGE = """<!DOCTYPE html>
         }
         
         function setDistance(value) {
+            currentThreshold = value;
             document.getElementById('thresholdDisplay').textContent = value + ' cm';
             updateDistButtons(value);
             
@@ -336,6 +345,7 @@ HTML_PAGE = """<!DOCTYPE html>
                     deviceId: 'esp12_security',
                     value: value
                 }));
+                console.log('Threshold sent to ESP: ' + value + 'cm');
             }
         }
         
@@ -346,13 +356,13 @@ HTML_PAGE = """<!DOCTYPE html>
                         type: 'disarm',
                         deviceId: 'esp12_security'
                     }));
-                    console.log('DISARM sent');
+                    console.log('DISARM sent to ESP');
                 } else {
                     ws.send(JSON.stringify({
                         type: 'arm',
                         deviceId: 'esp12_security'
                     }));
-                    console.log('ARM sent');
+                    console.log('ARM sent to ESP');
                 }
             }
         }
@@ -389,7 +399,7 @@ async def handle_ws(request):
     device_id = None
     last_alarm = False
     
-    print("🔌 New connection")
+    print("🔌 New WebSocket connection")
     
     try:
         async for msg in ws:
@@ -398,21 +408,21 @@ async def handle_ws(request):
                     data = json.loads(msg.data)
                     msg_type = data.get("type", "")
                     
-                    # ESP регистрация
+                    # ESP registration
                     if msg_type == "register":
                         device_id = data.get("deviceId", "")
                         if device_id in ALLOWED_DEVICES:
                             client_type = "esp"
                             esp_clients[device_id] = ws
-                            print(f"✅ ESP: {device_id}")
+                            print(f"✅ ESP connected: {device_id}")
                             await ws.send_json({"type": "registered"})
                     
-                    # Данные с датчика
+                    # Sensor data
                     elif msg_type == "sensor_data":
                         sensor = data.get("data", {})
                         
                         if sensor.get("alarm") and not last_alarm:
-                            print(f"🚨 ALARM!")
+                            print(f"🚨 ALARM! Distance: {sensor.get('distance')}cm")
                             notif = json.dumps({
                                 "type": "alarm_notification",
                                 "message": "INTRUDER DETECTED!"
@@ -433,26 +443,41 @@ async def handle_ws(request):
                                 dead.add(client)
                         web_clients.difference_update(dead)
                     
-                    # ARM / DISARM
-                    elif msg_type in ["arm", "disarm"]:
+                    # ARM command
+                    elif msg_type == "arm":
                         target = data.get("deviceId", "esp12_security")
-                        print(f"🔒 {msg_type.upper()} {target}")
+                        print(f"🔒 ARM command for {target}")
                         
                         if target in esp_clients:
                             cmd = json.dumps({
                                 "type": "command",
-                                "command": msg_type
+                                "command": "arm"
                             })
                             await esp_clients[target].send_str(cmd)
-                            print(f"✅ Command sent: {msg_type}")
+                            print(f"✅ ARM sent to {target}")
                         else:
-                            print(f"❌ Device {target} not connected!")
+                            print(f"❌ {target} not connected!")
+                    
+                    # DISARM command
+                    elif msg_type == "disarm":
+                        target = data.get("deviceId", "esp12_security")
+                        print(f"🔓 DISARM command for {target}")
+                        
+                        if target in esp_clients:
+                            cmd = json.dumps({
+                                "type": "command",
+                                "command": "disarm"
+                            })
+                            await esp_clients[target].send_str(cmd)
+                            print(f"✅ DISARM sent to {target}")
+                        else:
+                            print(f"❌ {target} not connected!")
                     
                     # Set threshold
                     elif msg_type == "set_threshold":
                         target = data.get("deviceId", "esp12_security")
                         value = int(data.get("value", 200))
-                        print(f"📏 Threshold {value}cm for {target}")
+                        print(f"📏 Set threshold {value}cm for {target}")
                         
                         if target in esp_clients:
                             cmd = json.dumps({
@@ -461,13 +486,15 @@ async def handle_ws(request):
                                 "value": value
                             })
                             await esp_clients[target].send_str(cmd)
-                            print(f"✅ Threshold sent: {value}")
+                            print(f"✅ Threshold sent: {value}cm")
+                        else:
+                            print(f"❌ {target} not connected!")
                     
                     # Web client
                     elif msg_type == "web_client":
                         client_type = "web"
                         web_clients.add(ws)
-                        print(f"🌐 Web client")
+                        print(f"🌐 Web client connected")
                 
                 except Exception as e:
                     print(f"Error: {e}")
@@ -478,6 +505,7 @@ async def handle_ws(request):
         if client_type == "esp" and device_id:
             if device_id in esp_clients:
                 del esp_clients[device_id]
+            print(f"❌ ESP disconnected: {device_id}")
         elif client_type == "web":
             web_clients.discard(ws)
     
@@ -490,4 +518,5 @@ if __name__ == '__main__':
     
     port = int(os.environ.get('PORT', 8000))
     print(f"Security Server on port {port}")
+    print(f"Allowed: {ALLOWED_DEVICES}")
     web.run_app(app, port=port)
